@@ -49,8 +49,6 @@ export const state = {
   library: { rows: [], total: 0 },
   /** 筛选项计数 */
   facets: null,
-  /** 转码预设 */
-  presets: null,
   /** 登录态状态 */
   cookies: null,
   /** SSE 连接是否还活着 */

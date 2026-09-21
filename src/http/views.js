@@ -22,8 +22,7 @@ function slim(v) {
     vcodec: v.vcodec, acodec: v.acodec,
     container: v.container, upload_date: v.upload_date, description: v.description,
     thumbnail_path: v.thumbnail_path, thumbnail_url: v.thumbnail_url,
-    file_path: v.file_path, transcoded_path: v.transcoded_path,
-    transcode_status: v.transcode_status, transcode_preset: v.transcode_preset,
+    file_path: v.file_path,
     playlist_id: v.playlist_id, playlist_index: v.playlist_index,
     notes: v.notes, starred: v.starred,
     created_at: v.created_at, finished_at: v.finished_at,
@@ -46,7 +45,7 @@ function slimHistoryRow(v) {
     kind: v.kind, site: v.site, uploader: v.uploader, error: v.error,
     file_path: v.file_path, file_size: v.file_size, duration: v.duration,
     height: v.height, container: v.container, finished_at: v.finished_at,
-    thumb_embed_ok: v.thumb_embed_ok, transcode_status: v.transcode_status,
+    thumb_embed_ok: v.thumb_embed_ok,
   };
 }
 

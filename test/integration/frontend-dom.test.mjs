@@ -80,7 +80,6 @@ function fakeResponses({ queue = {}, health = {} } = {}) {
     'GET /api/queue': baseQueue,
     'GET /api/library': { total: 0, rows: [] },
     'GET /api/facets': { sites: [], uploaders: [], statuses: [], totals: {} },
-    'GET /api/transcode-presets': [],
   };
 }
 

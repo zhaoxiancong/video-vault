@@ -4,7 +4,7 @@
  *
  * 背景：库里存的是绝对路径。用户把整个工具目录挪到别处（换盘、换电脑、
  * 放 U 盘）之后，服务本身还能起来（路径都从 __dirname 推导），
- * 但库里每条记录都指向旧位置 —— 封面空白、播放 404、转码找不到源文件。
+ * 但库里每条记录都指向旧位置 —— 封面空白、播放 404、找不到源文件。
  *
  * `healPaths()` 负责启动时把"旧根 + 相对片段"改写成"当前根 + 同一相对片段"。
  *
@@ -63,7 +63,6 @@ function seedOld(project, { filePath, downloadDir = null }) {
     file_path: filePath,
     thumbnail_path: `${project.oldRoot}\\data\\thumbs\\1.jpg`,
     log_path: `${project.oldRoot}\\data\\logs\\video-1.log`,
-    transcoded_path: `${project.oldRoot}\\downloads\\_converted\\x [h264].mp4`,
   });
   if (downloadDir) repo.setSettings({ downloadDir });
   repo.close();
@@ -102,7 +101,6 @@ test('项目被搬走后，库里的绝对路径自动修正到新位置', () =>
       '相对片段必须保持不变，只换根目录');
     assert.match(v.thumbnail_path, /data[\\/]thumbs[\\/]1\.jpg$/, '缩略图路径也要修');
     assert.match(v.log_path, /data[\\/]logs[\\/]video-1\.log$/, '日志路径也要修');
-    assert.match(v.transcoded_path, /_converted/, '转码产物路径也要修');
 
     assert.ok(mig.pathsHealed, '迁移结果里要报告修了几条');
     assert.equal(mig.pathsHealed.file_path, 1);

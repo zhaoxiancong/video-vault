@@ -2,7 +2,6 @@
  * 播放弹层。
  *
  * 服务端实现了 HTTP Range，所以拖动进度条是可用的（返回 206）。
- * 这里额外做一个「原始文件 / 转码产物」切换 —— 用户剪素材时想看的往往是转码后的。
  */
 
 import { api, formatError } from '../api.js';
@@ -20,38 +19,26 @@ export function initPlayer() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !$('#playerModal').hidden) closePlayer();
   });
-
-  $('#playerSource').addEventListener('change', () => {
-    if (current) loadSource(current, $('#playerSource').value);
-  });
 }
 
 /**
  * @param {number} id
- * @param {'original'|'transcoded'} source
  */
-export async function openPlayer(id, source = 'original') {
+export async function openPlayer(id) {
   const v = state.library.rows.find((r) => r.id === id);
   current = id;
 
   const modal = $('#playerModal');
   $('#playerTitle').textContent = (v && v.title) || `任务 ${id}`;
-  $('#playerSource').value = source;
 
-  // 没有转码产物时禁用那个选项，别让用户切过去看到一片黑
-  const hasTranscoded = Boolean(v && v.transcoded_path);
-  [...$('#playerSource').options].forEach((o) => {
-    o.disabled = o.value === 'transcoded' && !hasTranscoded;
-  });
-
-  loadSource(id, source);
+  loadSource(id);
   renderMeta(v);
   modal.hidden = false;
 }
 
-function loadSource(id, source) {
+function loadSource(id) {
   const player = $('#player');
-  const url = `/api/videos/${id}/file${source === 'transcoded' ? '?source=transcoded' : ''}`;
+  const url = `/api/videos/${id}/file`;
   player.src = url;
   $('#playerDownload').href = url;
   player.play().catch(() => {
@@ -75,9 +62,6 @@ function renderMeta(v) {
   replace($('#playerMeta'), [
     el('div', { class: 'pm-line', text: bits.join(' · ') }),
     v.file_path ? el('code', { class: 'pm-path', text: v.file_path }) : null,
-    v.transcode_status === 'done' && v.transcoded_path
-      ? el('code', { class: 'pm-path', text: `转码产物：${v.transcoded_path}` })
-      : null,
   ]);
 }
 

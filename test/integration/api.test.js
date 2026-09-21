@@ -245,17 +245,6 @@ test('不存在的记录：返回 404 且带可读提示', async () => {
   } finally { await s.cleanup(); }
 });
 
-test('转码：未完成的任务被拒绝', async () => {
-  const s = await startApp();
-  try {
-    const add = await s.call('POST', '/api/videos', { urls: 'https://example.com/tc' });
-    const id = add.data.added[0].id;
-    const r = await s.call('POST', `/api/videos/${id}/transcode`, { preset: 'h264-1080p' });
-    assert.equal(r.status, 400);
-    assert.match(r.data.error, /已下载完成/);
-  } finally { await s.cleanup(); }
-});
-
 test('删除：默认保留文件，带 keepFile=0 才删', async () => {
   const s = await startApp();
   try {
@@ -305,7 +294,7 @@ test('批量动作：未知动作被拒', async () => {
   } finally { await s.cleanup(); }
 });
 
-test('库查询、facets、转码预设都能用', async () => {
+test('库查询与 facets 都能用', async () => {
   const s = await startApp();
   try {
     await s.call('POST', '/api/videos', { urls: 'https://example.com/lib1' });
@@ -318,10 +307,27 @@ test('库查询、facets、转码预设都能用', async () => {
     const fac = await s.call('GET', '/api/facets');
     assert.equal(fac.status, 200);
     assert.ok(fac.data.totals);
+  } finally { await s.cleanup(); }
+});
 
+test('转码相关的接口与字段已彻底移除（用户要求去掉这个功能）', async () => {
+  const s = await startApp();
+  try {
+    const add = await s.call('POST', '/api/videos', { urls: 'https://example.com/no-tc' });
+    const id = add.data.added[0].id;
+
+    // 接口不该再存在
+    const tc = await s.call('POST', `/api/videos/${id}/transcode`, { preset: 'h264-1080p' });
+    assert.equal(tc.status, 404, '转码接口应当已经没了');
     const presets = await s.call('GET', '/api/transcode-presets');
-    assert.equal(presets.status, 200);
-    assert.ok(presets.data.some((p) => p.key === 'h264-1080p'));
+    assert.equal(presets.status, 404, '预设接口应当已经没了');
+
+    // 出站数据里也不该再出现那几个字段
+    const lib = await s.call('GET', '/api/library');
+    const row = lib.data.rows[0];
+    for (const k of ['transcoded_path', 'transcode_status', 'transcode_preset']) {
+      assert.equal(Object.hasOwn(row, k), false, `响应里不该再有 ${k}`);
+    }
   } finally { await s.cleanup(); }
 });
 

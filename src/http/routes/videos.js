@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 视频相关路由：添加 / 解析 / 动作 / 转码 / 播放 / 封面 / 日志 / 删除。
+ * 视频相关路由：添加 / 解析 / 动作 / 播放 / 封面 / 日志 / 删除。
  *
  * 每个处理函数只做三件事：**校验参数 → 调服务 → 返回视图**。
  * 业务逻辑一律在 app/ 那一层，这里不写 SQL、不碰子进程。
@@ -20,7 +20,7 @@ const { normalizeUrl, classifyUrl } = require('../../domain/video');
 const ACTIONS = ['pause', 'resume', 'cancel', 'retry', 'star', 'notes'];
 
 function register(router, ctx) {
-  const { repo, scheduler, transcode, downloader, urldiag, broadcast, settings } = ctx;
+  const { repo, scheduler, downloader, urldiag, broadcast, settings } = ctx;
 
   /**
    * 把一批链接加入下载队列 —— **唯一的入队实现**。
@@ -211,41 +211,14 @@ function register(router, ctx) {
     return json(res, 200, { ok, video: next });
   });
 
-  /** 转码（剪辑层：原始文件永不改动，产物另存 _converted/） */
-  router.post('/api/videos/:id/transcode', async (req, res, params) => {
-    const id = Number(params.id);
-    const body = await readJsonBody(req);
-    const v = findOr404(id);
-    const preset = String(body.preset || 'h264-1080p');
-
-    if (v.status !== STATUS.DONE || !v.file_path) {
-      throw new ValidationError('只有已下载完成的任务才能转码', {
-        hint: '等它下载完再试。正在下载或失败的任务没有可转码的原始文件。',
-      });
-    }
-
-    transcode.start(v, preset, {
-      onStart: () => broadcast('progress', slim(repo.getVideo(id))),
-      onDone: (info) => {
-        broadcast('progress', slim(repo.getVideo(id)));
-        broadcast('transcoded', info);
-      },
-      onFail: () => broadcast('progress', slim(repo.getVideo(id))),
-    });
-
-    return json(res, 202, { ok: true, preset, video: slim(repo.getVideo(id)) });
-  });
-
   // ---------------------------------------------------------------- 播放 / 封面 / 日志
 
-  router.get('/api/videos/:id/file', (req, res, params, url) => {
+  router.get('/api/videos/:id/file', (req, res, params) => {
     const id = Number(params.id);
     const v = findOr404(id);
     if (!v.file_path) throw new NotFoundError('这条记录还没有文件', { hint: '它可能还没下载完。' });
-    const useTranscoded = url.searchParams.get('source') === 'transcoded';
-    const target = useTranscoded ? (v.transcoded_path || v.file_path) : v.file_path;
     // Range 支持在这里（serveFile），播放器拖进度条靠它
-    return ctx.serveFile(res, req, target);
+    return ctx.serveFile(res, req, v.file_path);
   });
 
   router.get('/api/videos/:id/thumb', (req, res, params) => {
@@ -288,7 +261,8 @@ function register(router, ctx) {
     const keepFile = url.searchParams.get('keepFile') !== '0';
     const removed = [];
     if (!keepFile) {
-      for (const f of [v.file_path, v.transcoded_path]) {
+      // 只删这一条记录自己的文件。**没有转码产物了** —— 那个功能已整体移除。
+      for (const f of [v.file_path]) {
         if (f && fs.existsSync(f)) {
           try { fs.unlinkSync(f); removed.push(f); } catch { /* 被占用就留着 */ }
         }

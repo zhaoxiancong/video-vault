@@ -103,7 +103,7 @@ function createMediaTools(config) {
      *   }
      * 直接 parse 整段会以 "Unexpected token 'm'" 失败 → probe 返回 null →
      * 一个**完全正常**的视频被判成"损坏"，然后被删掉重下。
-     * 这个坑是在转码测试里撞出来的（转码产物带这种警告）。
+     * 这个坑是处理"带警告输出的文件"时撞出来的（例如 moov atom 写坏的那种）。
      */
     const start = text.indexOf('{');
     if (start === -1) return null;

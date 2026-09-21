@@ -263,7 +263,7 @@ function createDatabase(config, options = {}) {
    *
    * 背景：数据库里存的是绝对路径。一旦把项目文件夹挪走，服务本身还能起来
    * （路径都从 __dirname 推导），但库里每条记录都指向旧位置 —— 封面空白、
-   * 播放 404、转码找不到源文件。
+   * 播放 404、找不到源文件。
    *
    * 做法：把"旧根目录 + 相对片段"重写成"当前根目录 + 同一相对片段"。
    * 只有满足下面**全部**条件才改写，避免误伤用户自定义的外部目录：
@@ -273,7 +273,7 @@ function createDatabase(config, options = {}) {
    */
   function healPaths() {
     const fixed = {
-      file_path: 0, thumbnail_path: 0, log_path: 0, transcoded_path: 0, downloadDir: false,
+      file_path: 0, thumbnail_path: 0, log_path: 0, downloadDir: false,
     };
     const rootLower = config.root.toLowerCase();
 
@@ -309,25 +309,24 @@ function createDatabase(config, options = {}) {
       return null;
     };
 
+    // 只修这三个路径。**不再包含 transcoded_path** —— 转码功能已整体移除，
+    // 那个列还留在表里（保留列，代码不碰），但自愈不该再去写它。
     const rows = db.prepare(
-      'SELECT id, file_path, thumbnail_path, log_path, transcoded_path FROM videos',
+      'SELECT id, file_path, thumbnail_path, log_path FROM videos',
     ).all();
     const up = db.prepare(
-      'UPDATE videos SET file_path=?, thumbnail_path=?, log_path=?, transcoded_path=? WHERE id=?',
+      'UPDATE videos SET file_path=?, thumbnail_path=?, log_path=? WHERE id=?',
     );
     transaction(() => {
       for (const r of rows) {
         const nf = rewrite(r.file_path);
         const nt = rewrite(r.thumbnail_path);
         const nl = rewrite(r.log_path);
-        const nc = rewrite(r.transcoded_path);
-        if (!nf && !nt && !nl && !nc) continue;
+        if (!nf && !nt && !nl) continue;
         if (nf) fixed.file_path += 1;
         if (nt) fixed.thumbnail_path += 1;
         if (nl) fixed.log_path += 1;
-        if (nc) fixed.transcoded_path += 1;
-        up.run(nf || r.file_path, nt || r.thumbnail_path, nl || r.log_path,
-          nc || r.transcoded_path, r.id);
+        up.run(nf || r.file_path, nt || r.thumbnail_path, nl || r.log_path, r.id);
       }
 
       const row = db.prepare("SELECT value FROM settings WHERE key='downloadDir'").get();
@@ -359,7 +358,7 @@ function createDatabase(config, options = {}) {
     // 换来的是"整个文件夹随便挪"的能力。
     const healed = healPaths();
     if (healed && (healed.file_path || healed.thumbnail_path || healed.log_path
-        || healed.transcoded_path || healed.downloadDir)) {
+        || healed.downloadDir)) {
       result.pathsHealed = healed;
     }
 
@@ -559,7 +558,6 @@ function createDatabase(config, options = {}) {
         if (src.id === keep.id) continue;
         for (const col of ['thumbnail_path', 'notes', 'description', 'upload_date',
           'duration', 'width', 'height', 'fps', 'vcodec', 'acodec',
-          'transcoded_path', 'transcode_status', 'transcode_preset',
           'thumb_embed_ok', 'thumb_format', 'playlist_id', 'playlist_index', 'video_id',
           'extractor', 'uploader', 'site', 'title', 'file_size', 'container']) {
           if ((keep[col] === null || keep[col] === undefined || keep[col] === '')

@@ -21,7 +21,6 @@ const { createMediaTools } = require('./infra/media');
 const urldiag = require('./infra/urldiag');
 const { createDownloader } = require('./app/downloader');
 const { createScheduler } = require('./app/scheduler');
-const { createTranscodeService } = require('./app/transcode');
 const { createCrawler } = require('./app/crawler');
 const { createDiscovery } = require('./app/discovery');
 const { createServer } = require('./http/server');
@@ -74,7 +73,6 @@ function createApp(overrides = {}) {
   const downloadDir = () => settings().downloadDir;
 
   const scheduler = createScheduler(config, { repo, downloader, media, settings, downloadDir, urldiag });
-  const transcode = createTranscodeService(config, { repo, media, settings, downloadDir });
 
   // 「从网站找视频」：抓取实现 + 任务生命周期。
   // crawler 与 discovery 分开，是为了让抓取逻辑能脱离服务器单独测
@@ -89,14 +87,14 @@ function createApp(overrides = {}) {
   });
 
   const http = createServer({
-    config, repo, scheduler, transcode, downloader, urldiag, migrations, dupMerged, discovery,
+    config, repo, scheduler, downloader, urldiag, migrations, dupMerged, discovery,
   });
 
   // 启动时把上次没跑完的任务标成 paused —— **手动点继续才续，不偷偷跑流量**
   scheduler.recoverStale();
 
   return {
-    config, repo, scheduler, transcode, downloader, media, urldiag,
+    config, repo, scheduler, downloader, media, urldiag,
     server: http.server, router: http.router,
     migrations, dupMerged,
     settings, downloadDir,

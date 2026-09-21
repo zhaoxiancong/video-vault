@@ -1,5 +1,5 @@
 /**
- * 「我的库」页：搜索、筛选、网格/列表两种视图、播放与转码入口。
+ * 「我的库」页：搜索、筛选、网格/列表两种视图、播放入口。
  *
  * 筛选条件 persist 到 localStorage。理由很简单：用户筛到"某个 UP 主的、
  * 只看收藏"，刷新一下全归零，会很想打人。
@@ -54,7 +54,7 @@ export function initLibraryView({ onPlay }) {
 
   $('#btnLoadMore').addEventListener('click', () => reload({ reset: false }));
 
-  // 库里的动作（播放 / 转码 / 收藏 / 备注 / 删除）走事件委托
+  // 库里的动作（播放 / 收藏 / 备注 / 删除）走事件委托
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-lib]');
     if (!btn) return;
@@ -261,14 +261,8 @@ async function handleAction(action, id, { onPlay, reload: reloadFn }) {
   }
 }
 
-/** 「更多」菜单：转码、备注、复制路径、删除 */
+/** 「更多」菜单：备注、复制路径、复制链接、删除 */
 async function showMore(v, { onPlay, reload: reloadFn }) {
-  let presets = state.presets;
-  if (!presets) {
-    presets = await api('GET', '/api/transcode-presets');
-    state.presets = presets;
-  }
-
   const modal = $('#modal');
   const close = () => { modal.hidden = true; };
 
@@ -279,33 +273,6 @@ async function showMore(v, { onPlay, reload: reloadFn }) {
         v.file_size ? fmtBytes(v.file_size) : null].filter(Boolean).join(' · ') }),
       v.file_path ? el('code', { class: 'more-path', text: v.file_path }) : null,
       v.error ? el('div', { class: 'more-error', text: v.error }) : null,
-    ]),
-
-    el('div', { class: 'more-group' }, [
-      el('h4', { text: '转码（原始文件不会被改动，产物另存 _converted/）' }),
-      el('div', { class: 'more-btns' }, presets.map((p) => el('button', {
-        class: 'btn btn-sm', type: 'button', text: p.label,
-        onclick: async () => {
-          try {
-            await api('POST', `/api/videos/${v.id}/transcode`, { preset: p.key });
-            toast(`已开始转码：${p.label}`);
-            close();
-            reloadFn({ reset: true });
-          } catch (err) {
-            toast(formatError(err), 'bad');
-          }
-        },
-      }))),
-      v.transcode_status === 'done' && v.transcoded_path
-        ? el('div', { class: 'more-note' }, [
-          el('span', { text: '已生成转码产物：' }),
-          el('code', { text: v.transcoded_path }),
-          el('button', {
-            class: 'btn btn-sm', type: 'button', text: '播放转码产物',
-            onclick: () => { close(); onPlay(v.id, 'transcoded'); },
-          }),
-        ])
-        : null,
     ]),
 
     el('div', { class: 'more-group' }, [

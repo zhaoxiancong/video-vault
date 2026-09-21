@@ -29,7 +29,7 @@ const STATUS = Object.freeze({
   QUEUED: 'queued',
   PARSING: 'parsing',
   DOWNLOADING: 'downloading',
-  PROCESSING: 'processing',   // 合并 / 抽音频 / 转码
+  PROCESSING: 'processing',   // 合并 / 抽音频
   DONE: 'done',
   FAILED: 'failed',
   PAUSED: 'paused',           // 用户主动暂停 / 关站中断，可手动继续
@@ -54,7 +54,6 @@ const DEFAULT_SETTINGS = Object.freeze({
   audioFormat: 'mp3',
   videoContainer: 'mp4',
   embedThumbnail: true,       // 嵌入封面（遇到 ffmpeg 不支持的格式会自动跳过，不会导致任务失败）
-  transcodeTarget: '',        // 如 "h264-1080p"，空 = 不转码
   deletePartOnCancel: true,
 
   // ---- 登录态（二期）----

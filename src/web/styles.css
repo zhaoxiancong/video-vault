@@ -382,7 +382,7 @@ select {
 /* 历史项：和进行中的任务区分开（左边框用不上状态色了，改成更低的对比度） */
 .qitem.history { background: transparent; }
 
-/* 进度条动画：处理中（转码/合并）没有字节进度，用流动渐变表示"在动" */
+/* 进度条动画：处理中（合并）没有字节进度，用流动渐变表示"在动" */
 @keyframes slide { from { background-position: 0 0; } to { background-position: 200% 0; } }
 .qbar.tone-active {
   background: linear-gradient(90deg, var(--purple), var(--blue));

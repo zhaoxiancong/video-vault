@@ -27,7 +27,6 @@ const SETTINGS_SCHEMA = {
   audioFormat: { type: 'string', enum: ['mp3', 'm4a', 'opus', 'flac', 'wav'] },
   videoContainer: { type: 'string', enum: ['mp4', 'mkv'] },
   embedThumbnail: { type: 'boolean' },
-  transcodeTarget: { type: 'string', maxLength: 40 },
   deletePartOnCancel: { type: 'boolean' },
   cookiesFromBrowser: { type: 'string', maxLength: 30 },
   cookiesFile: { type: 'string', maxLength: 1000 },

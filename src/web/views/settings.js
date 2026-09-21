@@ -1,5 +1,5 @@
 /**
- * 「设置」页：下载参数、登录态、引擎状态、转码预设。
+ * 「设置」页：下载参数、登录态、引擎状态。
  *
  * 登录态的「测试」按钮是这一页最值钱的东西 —— 它**真的**拿一个需要登录态的
  * 地址跑一次解析，而不是只回一句"已配置"。原因：cookie 会过期、会被浏览器锁住、
@@ -195,12 +195,4 @@ export function renderEngineStatus() {
   if (!e.ytdlp.ok || !e.ffmpeg.ok) {
     toast('引擎不完整：跑 `node tools/bootstrap-engine.js` 把它装回来', 'bad');
   }
-}
-
-/** 转码预设清单 */
-export function renderPresets(presets) {
-  replace($('#presetList'), (presets || []).flatMap((p) => [
-    el('dt', { text: p.label }),
-    el('dd', { text: `.${p.ext}` }),
-  ]));
 }

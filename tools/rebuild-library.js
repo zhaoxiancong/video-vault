@@ -190,7 +190,7 @@ async function main() {
     console.log('   · 原始 URL  → 把原来的链接重新粘一次即可，文件已存在会跳过下载、只补元数据');
     console.log('   · 发布时间、简介、精确的封面映射');
     console.log('   · 收藏标记与备注');
-    console.log('   文件本身完好，不影响播放、搜索、转码。');
+    console.log('   文件本身完好，不影响播放与搜索。');
   }
   console.log('');
 

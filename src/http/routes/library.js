@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 库查询 / 队列快照 / 引擎自检 / 转码预设 —— 只读接口。
+ * 库查询 / 队列快照 / 引擎自检 —— 只读接口。
  *
  * 这些接口都是"读一次、回一次"，没有任何副作用（除了 /api/queue 会顺手
  * 把崩溃残留的任务标成 paused，那是 scheduler 的职责）。
@@ -8,7 +8,6 @@
 
 const { json } = require('../router');
 const { slimHistoryRow, slimPage } = require('../views');
-const { presetList } = require('../../app/transcode');
 
 /** 允许的排序方式（写死：不接受前端传任意 SQL 片段） */
 const SORTS = ['created_desc', 'created_asc', 'title_asc', 'size_desc', 'duration_desc'];
@@ -50,7 +49,7 @@ function register(router, ctx) {
     const history = repo.raw.prepare(
       `SELECT id,title,url,status,progress,kind,site,uploader,error,
               file_path,file_size,duration,height,container,finished_at,
-              thumb_embed_ok, transcode_status
+              thumb_embed_ok
        FROM videos
        WHERE status IN ('done','failed','canceled','paused')
        ORDER BY COALESCE(finished_at, updated_at) DESC, id DESC
@@ -89,10 +88,6 @@ function register(router, ctx) {
 
   router.get('/api/facets', (req, res) => {
     return json(res, 200, repo.facets());
-  });
-
-  router.get('/api/transcode-presets', (req, res) => {
-    return json(res, 200, presetList().map((p) => ({ key: p.name, label: p.label, ext: p.ext })));
   });
 
   /** 启动时做过哪些迁移 —— 界面/日志里能回看，排错时有用 */

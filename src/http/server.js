@@ -28,7 +28,6 @@ const discoverRoutes = require('./routes/discover');
  * @param {object} ctx.config
  * @param {object} ctx.repo
  * @param {object} ctx.scheduler
- * @param {object} ctx.transcode
  * @param {object} ctx.downloader
  * @param {object} ctx.urldiag
  * @param {object} ctx.migrations
@@ -54,7 +53,7 @@ function createServer(ctx) {
     settings: () => repo.getSettings(),
   };
 
-  // 调度器 / 转码服务的事件 → SSE
+  // 调度器的事件 → SSE
   scheduler.on('progress', (v) => broadcast('progress', slim(v)));
   scheduler.on('queue', (snap) => broadcast('queue', snap));
   scheduler.on('notice', (n) => broadcast('notice', n));
@@ -138,7 +137,6 @@ function createServer(ctx) {
   /** 优雅关闭：先停调度器（清定时器、杀子进程），再关连接。**不调它进程退不出来。** */
   function shutdown({ timeoutMs = 1500 } = {}) {
     scheduler.stop();
-    if (ctx.transcode) ctx.transcode.stopAll();
     // ⚠️ 爬取也要在这里收掉：它持有在飞的 fetch（AbortController）与事件监听器。
     //    不收的话进程退不出来 —— 这是这个项目反复强调过的一类问题。
     if (ctx.discovery) ctx.discovery.stop();

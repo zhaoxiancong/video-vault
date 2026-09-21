@@ -60,7 +60,7 @@ const TRANSITIONS = Object.freeze({
     STATUS.QUEUED,       // 损坏重下：重新排回队列
   ],
 
-  // 后处理（合并 / 转码 / 抽音频）
+  // 后处理（合并 / 抽音频）
   [STATUS.PROCESSING]: [
     STATUS.DONE,
     STATUS.PAUSED,

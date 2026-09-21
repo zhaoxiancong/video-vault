@@ -24,12 +24,12 @@ const WRITABLE_COLS = Object.freeze([
   // 产物
   'file_path', 'file_size',
   'width', 'height', 'fps', 'vcodec', 'acodec',
-  // 转码
-  'transcoded_path', 'transcode_status', 'transcode_preset',
   // 归类与元信息
   'playlist_id', 'playlist_index', 'subscription_id',
   'notes', 'starred', 'finished_at',
   'thumb_embed_ok', 'thumb_format',
+  // ⚠️ 表里还有 transcoded_path / transcode_status / transcode_preset 三列，
+  //    但**不在这里**：转码功能已整体移除，代码不再写它们（列保留，迁移零风险）。
 ]);
 
 const WRITABLE = new Set(WRITABLE_COLS);

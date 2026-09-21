@@ -19,7 +19,7 @@ import {
   onProgress, onQueueSnapshot, showLog, setConnected,
 } from './views/queue.js';
 import { initLibraryView, reload as reloadLibrary, renderLibrary } from './views/library.js';
-import { initSettingsView, fillSettings, renderEngineStatus, renderPresets } from './views/settings.js';
+import { initSettingsView, fillSettings, renderEngineStatus } from './views/settings.js';
 import { initDiscoverView, onCrawlEvent, renderList as renderDiscover } from './views/discover.js';
 import { initPlayer, openPlayer } from './views/player.js';
 
@@ -88,12 +88,6 @@ async function loadHealth() {
     // 添加页的限速下拉跟设置保持一致（正在操作时不打断用户）
     const rt = $('#optRate');
     if (rt && document.activeElement !== rt) rt.value = String(h.settings.rateLimitMB || 0);
-
-    // 转码预设
-    if (!state.presets) {
-      state.presets = await api('GET', '/api/transcode-presets');
-    }
-    renderPresets(state.presets);
   } catch {
     $('#engineDot').className = 'dot dot-bad';
     $('#engineText').textContent = '无法连接服务';

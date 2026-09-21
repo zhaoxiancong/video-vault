@@ -116,7 +116,7 @@ function runSync(exe, args, { timeout = 120000, env = childEnv(), cwd = undefine
 }
 
 /**
- * 起一个"长命令"（下载、转码），输出**追加**到调用方指定的日志文件。
+ * 起一个"长命令"（下载等），输出**追加**到调用方指定的日志文件。
  *
  * 返回 child 句柄和日志路径；调用方通过 tail 日志文件拿进度。
  * 刻意不解析 stdout —— 那个职责在 infra/progress.js。
