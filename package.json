@@ -16,7 +16,8 @@
     "test:unit": "node test/run.js unit",
     "test:integration": "node test/run.js integration",
     "test:ui": "node test/ui/smoke.js",
-    "check": "node tools/lint-undefined.js && node tools/check-frontend.js",
+    "check": "node tools/lint-undefined.js && node tools/check-frontend.js && node tools/check-classes.js",
+    "shots": "node tools/screenshot.js",
     "rebuild": "node tools/rebuild-library.js"
   },
   "keywords": [

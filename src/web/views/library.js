@@ -204,13 +204,14 @@ function buildRow(v) {
     el('div', { class: 'lrow-col', text: v.height ? `${v.height}p` : '—' }),
     el('div', { class: 'lrow-col', text: fmtBytes(v.file_size) }),
     el('div', { class: 'lrow-col', text: fmtDuration(v.duration) }),
-    el('div', { class: 'lrow-col' }, [
+    el('div', { class: 'lrow-col status' }, [
       el('span', {
         class: `qbadge tone-${STATUS_TONE[v.status] || 'muted'}`,
         text: STATUS_LABEL[v.status] || v.status,
       }),
     ]),
-    el('div', { class: 'lrow-col', text: fmtDate(v.created_at) }),
+    // `wide` 是给日期列的：'2026-09-21 00:49' 比其它列长得多，窄了会被截断
+    el('div', { class: 'lrow-col wide', text: fmtDate(v.created_at) }),
     el('div', { class: 'lrow-actions' }, [
       v.status === 'done' && v.file_path
         ? el('button', { class: 'btn btn-sm btn-primary', type: 'button', dataset: { lib: 'play' }, text: '播放' })
