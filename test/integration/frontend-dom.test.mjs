@@ -584,3 +584,138 @@ test('找视频页：候选标题里的尖括号原样保留（防 innerHTML 注
     assert.equal(title.children.length, 0, '不该被解析成子元素（那意味着用了 innerHTML）');
   } finally { dom.restore(); }
 });
+
+// ---------------------------------------------------------------- 库页的收藏按钮
+
+/**
+ * ⚠️ 这条测试是从一个真 bug 补回来的（用户报"收藏按钮点了没反应"）。
+ *
+ * 病灶：`handleAction` 里**客户端和服务端各翻转了一次**。
+ *   服务端：`repo.updateVideo(id, { starred: !cur.starred })`（权威）
+ *   客户端：`v.starred = !v.starred`（基于**本地可能已过期**的值）
+ * 两者方向相反时（本地 false / 服务端已是 true），界面上会出现
+ * "翻成 false、5ms 后又被服务端的 true 翻回 true" —— 净效果为零，
+ * 用户看到的就是"没反应"，而**数据库里其实已经改了**（界面与库不一致）。
+ *
+ * 所以这里刻意让本地值过期（行里写 false，而服务端这次返回 true），
+ * 断言最终按钮文字必须与服务端一致 —— 修复前这条必然红。
+ */
+test('库页：本地值过期时点收藏，界面必须跟服务端一致（不能双翻转）', async () => {
+  const staleRow = {
+    id: 42, url: 'https://x/v/42', title: 'star target', site: 'X', uploader: 'u',
+    status: 'done', height: 1080, file_size: 1024, duration: 60,
+    created_at: '2026-09-22 10:00', file_path: 'D:\\dl\\42.mp4',
+    starred: false,          // ← 本地以为没收藏
+  };
+  // 服务端这次返回的是 **true**（权威值），与本地相反
+  const serverRow = { ...staleRow, starred: true };
+
+  // ⚠️ 只建**一个** DOM 环境。第一版写了两个（外面一个 installDom、
+  //    bootFrontend 里面又建一个），全局 document 被后建的换掉，
+  //    于是外层那个变量指向的是已经被丢弃的 document，`.tab` 查出来是 null。
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/library': { total: 1, rows: [staleRow] },
+      'POST /api/videos/42/action': { ok: true, video: serverRow },
+    },
+  });
+  try {
+    // ⚠️ 用 querySelectorAll + find，别写 `document.querySelector('.tab[data-view="library"]')`：
+    //    垫片的 **document 级**查询对"组合选择器 + 属性"支持不全（返回 null），
+    //    而元素级支持。本文件里所有能跑的测试都用这个写法。
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const btnBefore = globalThis.document.querySelector('#libGrid [data-lib="star"]');
+    assert.ok(btnBefore, '库页应当渲染出收藏按钮');
+    assert.equal(btnBefore.textContent, '☆', '本地以为没收藏');
+
+    btnBefore.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const btnAfter = globalThis.document.querySelector('#libGrid [data-lib="star"]');
+    assert.equal(btnAfter.textContent, '★',
+      '服务端返回 starred=true，界面必须显示 ★；显示 ☆ 说明本地又翻转了一次（双翻转 bug）');
+    assert.equal(btnAfter.getAttribute('title'), '取消收藏');
+  } finally { dom.restore(); }
+});
+
+/**
+ * ⚠️ 上面那条测试**还不够**：SSE 推来的服务端权威值会把错误纠正掉，
+ * 所以即使代码是"本地翻转"的旧写法，它也能通过（反证验过：退回旧写法仍然全绿）。
+ *
+ * 真正会咬住 bug 的是**"SSE 没送到"**这个场景：
+ *   - SSE 断线（离线过、代理超时、页面刚从后台唤醒）时收不到校正
+ *   - 或者事件就是丢了
+ * 那时界面只能靠 `handleAction` 自己写对。用本地翻转就会把权威值写反，
+ * 于是**点了没反应**（正好是用户报的症状）。
+ *
+ * 做法：装好 DOM 后先把 SSE 流切断，再点收藏。
+ */
+test('库页：SSE 没送到时，收藏也必须写对（不能依赖服务端推回来纠正）', async () => {
+  const staleRow = {
+    id: 55, url: 'https://x/v/55', title: 'offline star', status: 'done',
+    created_at: '2026-09-22 10:00', file_path: 'D:\\dl\\55.mp4',
+    starred: false,     // 本地过期（服务端其实已是 true）
+  };
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/library': { total: 1, rows: [staleRow] },
+      'POST /api/videos/55/action': { ok: true, video: { ...staleRow, starred: true } },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 把 SSE 流全掐掉 —— 模拟断线，收不到服务端校正
+    if (dom.streams && dom.streams.length) {
+      for (const s of dom.streams) { try { s.emit = () => {}; } catch { /* 忽略 */ } }
+      assert.ok(true, '已掐断 SSE');
+    } else {
+      throw new Error('垫片没提供 streams，无法模拟 SSE 断线');
+    }
+
+    const btn = globalThis.document.querySelector('#libGrid [data-lib="star"]');
+    assert.ok(btn, '库页应当渲染出收藏按钮');
+    assert.equal(btn.textContent, '☆', '本地以为没收藏');
+
+    btn.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const after = globalThis.document.querySelector('#libGrid [data-lib="star"]');
+    assert.equal(after.textContent, '★',
+      'SSE 没送到时，界面必须直接用 POST 返回的权威值（starred=true）→ ★。'
+      + '显示 ☆ 说明代码用了本地翻转，一旦 SSE 断线用户就会看到"点了没反应"');
+  } finally { dom.restore(); }
+});
+
+test('库页：点收藏会调用 action 接口，而不是只改本地', async () => {
+  const row = {
+    id: 7, url: 'https://x/v/7', title: 't', status: 'done',
+    created_at: '2026-09-22 10:00', file_path: 'D:\\dl\\7.mp4', starred: false,
+  };
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/library': { total: 1, rows: [row] },
+      'POST /api/videos/7/action': { ok: true, video: { ...row, starred: true } },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const btn = globalThis.document.querySelector('#libGrid [data-lib="star"]');
+    assert.ok(btn, '库页应当渲染出收藏按钮');
+
+    btn.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('/api/videos/7/action'));
+    assert.ok(hit, `必须真的发请求，不能只改本地。实际调用：${dom.calls.map((c) => c.url.split('?')[0]).join(' | ')}`);
+    assert.equal(hit.body.action, 'star');
+  } finally { dom.restore(); }
+});

@@ -173,7 +173,17 @@ export class FakeElement extends FakeNode {
     for (const n of nodes) {
       if (n === null || n === undefined) continue;
       const node = typeof n === 'string' ? this.ownerDocument.createTextNode(n) : n;
-      if (node._parent) node._parent.removeChild(node);
+      // 换爹前先从旧爹那里摘掉。⚠️ 旧爹可能是 **document 自己**
+      // （body 的 _parent 就是它，见 FakeDocument 的注释），而 document
+      // 没有 removeChild —— 所以这里直接操作 _children，不再走 removeChild。
+      if (node._parent) {
+        const sib = node._parent._children;
+        if (Array.isArray(sib)) {
+          const i = sib.indexOf(node);
+          if (i >= 0) sib.splice(i, 1);
+        }
+        node._parent = null;
+      }
       node._parent = this;
       this._children.push(node);
     }
@@ -354,9 +364,22 @@ export class FakeDocument {
     this.activeElement = null;
     this.hidden = false;
     this.body = new FakeElement('body', this);
-    this.body._parent = null;
     this.documentElement = new FakeElement('html', this);
-    this.documentElement.append(this.body);
+    /**
+     * ⚠️ 父链必须是 `…元素 → body → html → document`，且**不能有环**。
+     *
+     * `dispatchEvent` 顺着 `_parent` 往上冒泡，走到 document 才停。
+     * 这里踩过两次：
+     *   ① 最早写 `body._parent = null` —— 事件走到 body 就停了，**永远到不了
+     *      document**。而项目里大量交互（库页的播放/收藏/更多）正挂在 document
+     *      的委托监听上，于是它们在测试里从来没被触发过（"点了没反应"）。
+     *   ② 改成先给 body 设父、再 `documentElement.append(body)` ——
+     *      append 会把 body 的父**改回 html**，形成 `BODY → HTML → BODY` 的死循环。
+     *
+     * 正确写法：body 的父 = documentElement，documentElement 的父 = document。
+     */
+    this.body._parent = this.documentElement;
+    this.documentElement._parent = this;
   }
 
   createElement(tag) { return new FakeElement(tag, this); }

@@ -235,9 +235,22 @@ async function handleAction(action, id, { onPlay, reload: reloadFn }) {
     if (action === 'play') return onPlay(id);
 
     if (action === 'star') {
-      await api('POST', `/api/videos/${id}/action`, { action: 'star' });
-      // 本地先翻转，界面立刻有反馈（服务端随后会推 SSE 校正）
-      v.starred = !v.starred;
+      const res = await api('POST', `/api/videos/${id}/action`, { action: 'star' });
+      /**
+       * ⚠️ 服务端返回的是**权威值**，必须用它，不能在本地 `!v.starred` 翻转。
+       *
+       * 踩过的坑（用户报"收藏按钮点了没反应"）：本地那个 `v.starred` 可能**已经过期**
+       * （别的页面/别的操作改过它），于是"本地翻转"和"服务端翻转"方向相反：
+       * 服务端把它 false→true 并存库，本地却基于旧值又翻一次
+       * （以为在翻转，实际是把 true 写回 false），紧接着 SSE 推来服务端的 true
+       * 再把它翻回去 —— 5ms 内翻了两次，**净效果为零**，
+       * 用户看到的就是"没反应"，而数据库里其实已经改了（界面与库不一致）。
+       *
+       * 用服务端返回值就没有这个问题：它不依赖本地状态，也不会出现双重翻转。
+       */
+      const fresh = res && res.video ? res.video : null;
+      if (fresh && typeof fresh.starred === 'boolean') v.starred = fresh.starred;
+      else v.starred = !v.starred;   // 万一服务端没回，退回乐观翻转
       renderLibrary();
       return;
     }
