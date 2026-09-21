@@ -120,20 +120,48 @@ for (const file of files) {
   //    · 赋值右值也收（`const x = foo(...)`），因为漏导入的调用常出现在这里。
   const candidates = new Set();
   const lines = normalized.split('\n');
-  for (const raw of lines) {
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    // 跳过注释行
-    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue;
-    // 行首调用：foo(...)  或  await foo(...)  或  return foo(...)
-    let m = trimmed.match(/^(?:await\s+|return\s+|void\s+)?([A-Za-z_$][\w$]*)\s*\(/);
-    if (m) { candidates.add(m[1]); continue; }
-    // 赋值右值：const x = foo( / let [a,b] = foo(
-    m = trimmed.match(/^(?:const|let|var)\s+[^=]+=\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\(/);
-    if (m) { candidates.add(m[1]); continue; }
+
+  /** 收集"行首调用"（以及赋值右值调用）—— 这正是漏导入/漏删调试代码的形状 */
+  const collectLineStart = (text) => {
+    const found = new Set();
+    for (const raw of text.split('\n')) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      // 跳过注释行
+      if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue;
+      // 行首调用：foo(...) / await foo(...) / return foo(...)
+      let m = trimmed.match(/^(?:await\s+|return\s+|void\s+)?([A-Za-z_$][\w$]*)\s*\(/);
+      if (m) { found.add(m[1]); continue; }
+      // 赋值右值：const x = foo(...) / let [a,b] = foo(...)
+      m = trimmed.match(/^(?:const|let|var)\s+[^=]+=\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\(/);
+      if (m) { found.add(m[1]); continue; }
+    }
+    return found;
+  };
+
+  const lineStartCalls = collectLineStart(normalized);
+  for (const n of lineStartCalls) candidates.add(n);
+
+  /**
+   * 剔除"方法名"—— 链式调用 `.foo(` 里的 foo 不是被调用的函数。
+   *
+   * ⚠️ 这里修的是一个真实盲区（原实现用全局匹配，见下）：
+   *    原实现直接 `for (const mm of normalized.matchAll(/\.\s*(\w+)\s*\(/g)) candidates.delete(mm[1])`，
+   *    **全局**匹配的后果是：文件里任何地方出现 `.path.join(`，就会把 `path`
+   *    从候选里删掉。于是 `scheduler.js` 漏写 `require('node:path')` 却用了
+   *    `path.extname()`，linter 一声不吭，直到运行时炸 "path is not defined"。
+   *
+   *    修法：**已经在行首被当成调用收集过的名字，不因为"别处有 .foo(" 而被删掉。**
+   *    这样既保留了原有的降噪能力（`path.join` 里的 join 会被删），
+   *    又不会把 `path` 这种真正被调用的标识符误删。
+   *
+   *    （试过"只认前面不是点的调用"，但那会把模板串 `${b(x)}` 里的 b 也当成
+   *      独立调用，误报一堆 —— 还是这个"保护已知调用名"的办法更准。）
+   */
+  for (const mm of normalized.matchAll(/\.\s*([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (lineStartCalls.has(mm[1])) continue;   // 它在别处是独立调用，不能删
+    candidates.delete(mm[1]);
   }
-  // 排除链式属性 .foo(（行首形如 `this.foo(` 已不会命中，这里兜底其它情形）
-  for (const mm of normalized.matchAll(/\.\s*([A-Za-z_$][\w$]*)\s*\(/g)) candidates.delete(mm[1]);
   // 排除函数声明本身
   for (const mm of normalized.matchAll(/(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) candidates.delete(mm[1]);
   for (const mm of normalized.matchAll(/\bclass\s+([A-Za-z_$][\w$]*)/g)) candidates.delete(mm[1]);
@@ -145,6 +173,50 @@ for (const file of files) {
   for (const mm of normalized.matchAll(/^[ \t]*(?:async\s+|static\s+|get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\([^;]*\)\s*\{\s*$/gm)) {
     candidates.delete(mm[1]);
   }
+  // 统一做一次大小写无关的跳过词过滤
+  for (const c of [...candidates]) {
+    if (SKIP_WORDS.has(c.toLowerCase())) candidates.delete(c);
+  }
+
+  /**
+   * 第 1b 步：**"用了某个模块却没 require 它"**。
+   *
+   * ⚠️ 为什么需要这一步 —— 一个真实的漏网案例：
+   *    `src/app/scheduler.js` 里用了 `path.extname(filePath)`，但重构时忘了写
+   *    `const path = require('node:path')`。第一版 linter 抓不到，因为它的候选
+   *    只来自"行首调用" `foo(`，而 `path` **从来不是被调用的那个**
+   *    （被调用的是 `extname`）。运行时才炸 "path is not defined"。
+   *
+   *    教训：只检查"函数调用"的 linter，看不见"忘了 import 一个模块"这类错误 ——
+   *    而那恰恰是重构时最容易犯的错之一。
+   *
+   * 为什么只查已知的 Node 内置模块名，而不是扫描所有裸标识符：
+   *    试过"扫所有 `name.` 引用"，结果把注释和字符串里的 `AGENTS.md`、`github.com`、
+   *    `yt-dlp.exe`、`System.Text` 全报成未定义 —— 29 个文件误报。
+   *    裸标识符扫描需要真正的解析器，正则做不到。
+   *    只认内置模块名就没有这个问题：名字是有限且明确的，命中即真问题。
+   */
+  const NODE_BUILTINS = [
+    'assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console', 'crypto',
+    'dgram', 'diagnostics_channel', 'dns', 'domain', 'events', 'fs', 'http', 'http2',
+    'https', 'inspector', 'module', 'net', 'os', 'path', 'perf_hooks', 'process',
+    'punycode', 'querystring', 'readline', 'repl', 'stream', 'string_decoder', 'test',
+    'timers', 'tls', 'trace_events', 'tty', 'url', 'util', 'v8', 'vm', 'wasi',
+    'worker_threads', 'zlib', 'sqlite', 'sea',
+  ];
+  for (const mod of NODE_BUILTINS) {
+    // 这个文件里有没有用 `mod.something`
+    const used = new RegExp(`(^|[^.\\w$])${mod}\\s*\\.\\s*[A-Za-z_$]`).test(normalized);
+    if (!used) continue;
+    // 有没有 require 进来 / 解构出来 / 当参数收到
+    const required = new RegExp(
+      `require\\(\\s*['"]node:${mod}['"]|require\\(\\s*['"]${mod}['"]`
+      + `|\\b(?:const|let|var)\\s+${mod}\\b`
+      + `|\\([^)]*\\b${mod}\\b[^)]*\\)\\s*(?:=>|\\{)`,   // 函数参数里有它
+    ).test(normalized);
+    if (!required) candidates.add(mod);
+  }
+
   // 统一做一次大小写无关的跳过词过滤
   for (const c of [...candidates]) {
     if (SKIP_WORDS.has(c.toLowerCase())) candidates.delete(c);
@@ -173,6 +245,11 @@ for (const file of files) {
     problems++;
     console.log(`  ❌ ${rel}`);
     for (const n of realMissing) {
+      // 内置模块名的话，问题不是"调用了未定义函数"，而是"忘了 require"
+      if (NODE_BUILTINS.includes(n)) {
+        console.log(`       用了 ${n}.xxx，但没看到 require('node:${n}')`);
+        continue;
+      }
       const ln = normalized.split('\n').findIndex((l) =>
         new RegExp(`(^|[^.\\w$'"])${n}\\s*\\(`).test(l)) + 1;
       console.log(`       第 ${ln} 行附近：调用了未定义的 ${n}()`);

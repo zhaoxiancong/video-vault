@@ -25,6 +25,32 @@ const AUDIO_EXT_RE = /\.(mp3|m4a|opus|flac|wav|aac)$/i;
 const PARTIAL_EXT_RE = /\.(part|ytdl|temp|tmp)$/i;
 
 /**
+ * yt-dlp 的**中间分片**：`标题 [1080p137+251].f137.mp4` 里那个 `.f137`。
+ *
+ * ⚠️ 这个正则是修一个真实 bug 加的，改动前请先读完：
+ *
+ *   `findNewest()` 的用途是"结果文件读不到时，扫下载目录兜底找成品"。
+ *   但它原来只按"媒体扩展名 + mtime 最新"来挑，于是**经常挑中分片** ——
+ *   分片比合并后的成品写得更晚/更近，而且 `.f269.mp4` 也匹配 `.mp4`。
+ *
+ *   分片只有一条流（视频或音频），ffprobe 读它时**没有时长/分辨率**，
+ *   于是 `isPlayable()` 判"不合格" → `finish()` 把文件删掉并触发重下 →
+ *   下一次又挑中另一个分片 → 直到重试上限，任务被标成
+ *   "文件损坏且重下仍失败"。
+ *
+ *   而真实情况是：**下载完全成功**（日志里 Merger / Metadata / MoveFiles
+ *   全部 finished，零 ERROR），成品就躺在同一个目录里。
+ *
+ *   所以兜底查找必须把分片排除掉。
+ */
+const FRAGMENT_RE = /\.f\d+(\.[a-z0-9]+)?$/i;
+
+/** 这个文件名是不是 yt-dlp 的中间分片 */
+function isFragment(name) {
+  return FRAGMENT_RE.test(String(name || ''));
+}
+
+/**
  * @param {object} config loadConfig() 产物
  */
 function createMediaTools(config) {
@@ -37,40 +63,55 @@ function createMediaTools(config) {
    *
    * @returns {object|null} null = 探测失败（文件坏了 / ffprobe 缺失）
    */
+  /**
+   * 用 ffprobe 读真实媒体信息。
+   *
+   * ⚠️ 这里踩过一个自己造的坑，记下来免得再犯：
+   *    `runSync()` **自己管理输出文件**（它内部开临时文件并把 stdout 读成字符串返回）。
+   *    重构时我照搬了老代码的写法 —— 先在外部 openSync 一个临时文件、
+   *    再把 fd 传进去 —— 但 `runSync` 的签名是 `(exe, args, opts)`，
+   *    **根本不接受 fd**。于是那个外部临时文件永远是 0 字节，
+   *    读出来是空串，JSON.parse 报 "Unexpected end of JSON input"，
+   *    probe() 返回 null，上层就把一个**完全正常的视频**判成"损坏"。
+   *
+   *    现在直接用 `runSync` 返回的 stdout，不再自己开文件。
+   *    （老代码之所以要开 fd，是因为它直接调 spawnSync；封装之后就不需要了。）
+   *
+   * @returns {object|null} null = 探测失败（文件坏了 / ffprobe 缺失）
+   */
   function probe(filePath) {
     if (!fs.existsSync(paths.ffprobe)) return null;
-    const tmp = path.join(paths.data, `_ffprobe-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
-    fs.mkdirSync(path.dirname(tmp), { recursive: true });
-    let fd;
-    try {
-      fd = fs.openSync(tmp, 'w');
-      const r = runSync(paths.ffprobe, [
-        '-v', 'error', '-print_format', 'json',
-        '-show_format', '-show_streams', filePath,
-      ], { timeout: 60000 });
-      fs.closeSync(fd);
-      fd = null;
-      if (!r.ranOk || r.status !== 0) return null;
 
-      const data = JSON.parse(fs.readFileSync(tmp, 'utf8'));
-      const v = (data.streams || []).find((s) => s.codec_type === 'video');
-      const a = (data.streams || []).find((s) => s.codec_type === 'audio');
-      return {
-        file_size: Number(data.format && data.format.size) || null,
-        duration: data.format && data.format.duration
-          ? Math.round(Number(data.format.duration)) : null,
-        width: (v && v.width) || null,
-        height: (v && v.height) || null,
-        fps: v && v.r_frame_rate ? evalFps(v.r_frame_rate) : null,
-        vcodec: (v && v.codec_name) || null,
-        acodec: (a && a.codec_name) || null,
-      };
+    const r = runSync(paths.ffprobe, [
+      '-v', 'error', '-print_format', 'json',
+      '-show_format', '-show_streams', filePath,
+    ], { timeout: 60000 });
+
+    // 进程没跑起来 / 退出码非 0 → 读不出东西（半截文件、不支持的容器等）
+    if (!r.ranOk || r.status !== 0) return null;
+
+    const text = (r.stdout || '').trim();
+    if (!text) return null;
+
+    let data;
+    try {
+      data = JSON.parse(text);
     } catch {
       return null;
-    } finally {
-      if (fd !== null && fd !== undefined) { try { fs.closeSync(fd); } catch { /* 忽略 */ } }
-      try { fs.unlinkSync(tmp); } catch { /* 忽略 */ }
     }
+
+    const v = (data.streams || []).find((s) => s.codec_type === 'video');
+    const a = (data.streams || []).find((s) => s.codec_type === 'audio');
+    return {
+      file_size: Number(data.format && data.format.size) || null,
+      duration: data.format && data.format.duration
+        ? Math.round(Number(data.format.duration)) : null,
+      width: (v && v.width) || null,
+      height: (v && v.height) || null,
+      fps: v && v.r_frame_rate ? evalFps(v.r_frame_rate) : null,
+      vcodec: (v && v.codec_name) || null,
+      acodec: (a && a.codec_name) || null,
+    };
   }
 
   /** "30000/1001" → 29.97 */
@@ -81,23 +122,57 @@ function createMediaTools(config) {
   }
 
   /**
-   * 实测一个媒体文件是不是**真的能用**。
-   * 判据：至少有时长；视频文件还必须能读出分辨率。
+   * 实测一个媒体文件是不是**真的能用**，并说明判断依据。
+   *
+   * ⚠️ 为什么返回对象而不是布尔：
+   *    以前没有 ffprobe 时这里直接 `return true`（"我验不了，那就当它是好的"）。
+   *    那是个**静默的假阳性** —— 上层以为"已验证通过"，实际根本没验。
+   *    而"文件存在 ≠ 文件完整"恰恰是这个项目最贵的教训之一（坑 11）。
+   *
+   *    现在把"没验过"明说出来（`verified:false`），由调用方决定要不要采信。
+   *    自动流程的策略是"采信但记下来"，至少不会有人误以为验过了。
+   *
+   * @returns {{ok:boolean, reason:string, verified:boolean, probe:object|null}}
    */
-  function isPlayable(filePath) {
-    if (!filePath || !fs.existsSync(filePath)) return false;
-    try {
-      if (fs.statSync(filePath).size < 1024) return false;
-    } catch { return false; }
+  function inspect(filePath) {
+    if (!filePath || typeof filePath !== 'string') {
+      return { ok: false, reason: '路径为空', verified: false, probe: null };
+    }
+    if (!fs.existsSync(filePath)) {
+      return { ok: false, reason: '文件不存在', verified: false, probe: null };
+    }
+    let size = 0;
+    try { size = fs.statSync(filePath).size; } catch { /* 下面统一处理 */ }
+    if (size < 1024) {
+      return { ok: false, reason: `文件太小（${size} 字节）`, verified: true, probe: null };
+    }
 
-    // 没有 ffprobe 就不阻断流程（宁可放过，也不要因为工具缺失把好文件判死）
-    if (!fs.existsSync(paths.ffprobe)) return true;
+    // 没有 ffprobe：**明确报告"没验过"**，而不是假装验过了
+    if (!fs.existsSync(paths.ffprobe)) {
+      return {
+        ok: true,
+        reason: '没有 ffprobe，无法实测完整性（内容未经校验）',
+        verified: false,
+        probe: null,
+      };
+    }
 
     const p = probe(filePath);
-    if (!p) return false;
-    if (!p.duration || p.duration <= 0) return false;
-    if (!AUDIO_EXT_RE.test(filePath) && !p.height) return false;
-    return true;
+    if (!p) {
+      return { ok: false, reason: 'ffprobe 读不出这个文件（很可能是半截/损坏）', verified: true, probe: null };
+    }
+    if (!p.duration || p.duration <= 0) {
+      return { ok: false, reason: 'ffprobe 读不到时长', verified: true, probe: p };
+    }
+    if (!AUDIO_EXT_RE.test(filePath) && !p.height) {
+      return { ok: false, reason: '读不到分辨率（可能只有音频流，或是中间分片）', verified: true, probe: p };
+    }
+    return { ok: true, reason: 'ffprobe 实测通过', verified: true, probe: p };
+  }
+
+  /** 便捷包装：只要"能不能用"。细节用 inspect()。 */
+  function isPlayable(filePath) {
+    return inspect(filePath).ok;
   }
 
   /**
@@ -134,13 +209,19 @@ function createMediaTools(config) {
   }
 
   /**
-   * 兜底：在下载目录里找该任务最近产生的媒体文件。
+   * 兜底：在下载目录里找该任务最近产生的**成品**媒体文件。
    * 用在「--print-to-file 没读到、日志里也没抓到路径」的时候。
+   *
+   * ⚠️ 必须排除 yt-dlp 的中间分片（`.f137.mp4` 这种）——
+   *    分片只有一条流，ffprobe 读不出时长，会被 isPlayable 判成"损坏"，
+   *    然后 finish() 把它删掉重下，形成"永远失败"的假故障。
+   *    这个坑真的踩过，见 FRAGMENT_RE 的注释。
    */
-  function findNewest(dir, { since = 0, maxDepth = 3 } = {}) {
+  function findNewest(dir, { since = 0, maxDepth = 3, allowFragments = false } = {}) {
     let best = null;
     walk(dir, maxDepth, (full, name) => {
       if (!MEDIA_EXT_RE.test(name)) return;
+      if (!allowFragments && isFragment(name)) return;
       let st;
       try { st = fs.statSync(full); } catch { return; }
       // 留 5 秒余量：文件系统时间戳精度和时钟抖动
@@ -199,15 +280,20 @@ function createMediaTools(config) {
   return {
     probe,
     evalFps,
+    inspect,
     isPlayable,
     cleanupFormatFiles,
     removePartials,
     findNewest,
     grabThumbnail,
     walk,
+    isFragment,
     MEDIA_EXT_RE,
     PARTIAL_EXT_RE,
+    FRAGMENT_RE,
   };
 }
 
-module.exports = { createMediaTools, MEDIA_EXT_RE, AUDIO_EXT_RE, PARTIAL_EXT_RE };
+module.exports = {
+  createMediaTools, MEDIA_EXT_RE, AUDIO_EXT_RE, PARTIAL_EXT_RE, FRAGMENT_RE, isFragment,
+};

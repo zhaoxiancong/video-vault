@@ -41,6 +41,7 @@
  */
 
 const fs = require('node:fs');
+const path = require('node:path');
 const { EventEmitter } = require('node:events');
 
 const { STATUS } = require('../infra/config');
@@ -468,26 +469,36 @@ function createScheduler(config, deps) {
     if (!filePath) filePath = media.findNewest(deps.downloadDir(), { since: job.startedAt });
 
     // ---- 完整性校验（README 坑 11）：文件"存在"不等于"完整"
-    if (filePath && fs.existsSync(filePath) && !media.isPlayable(filePath)) {
-      const detail = require('../infra/progress').cleanError(readTail(job.logPath, 4000));
-      media.cleanupFormatFiles(deps.downloadDir(), v, filePath);
-      try { fs.unlinkSync(filePath); } catch { /* 删不掉就让它在原地 */ }
+    //
+    // 判据是 ffprobe **实测**，不是 fs.existsSync。
+    // 实测不通过就清掉残留 + 自动重下一次（只重一次，避免坏源无限循环）。
+    if (filePath && fs.existsSync(filePath)) {
+      const verdict = media.inspect(filePath);
+      if (!verdict.ok) {
+        const detail = require('../infra/progress').cleanError(readTail(job.logPath, 4000));
+        media.cleanupFormatFiles(deps.downloadDir(), v, filePath);
+        try { fs.unlinkSync(filePath); } catch { /* 删不掉就让它在原地 */ }
 
-      // 只自动重下一次，避免坏源导致无限循环
-      if (!autoRetry.has(id)) {
-        autoRetry.add(id);
-        setStatus(id, STATUS.QUEUED, {
-          progress: 0, speed: 0, eta: 0,
-          error: '输出文件损坏，已清理残留并自动重新下载一次',
-        }, `任务 ${id} 损坏重下`);
-        broadcast(id);
-        emitQueue();
-        kick();
+        if (!autoRetry.has(id)) {
+          autoRetry.add(id);
+          setStatus(id, STATUS.QUEUED, {
+            progress: 0, speed: 0, eta: 0,
+            error: `输出文件不合格（${verdict.reason}），已清理并自动重新下载一次`,
+          }, `任务 ${id} 损坏重下`);
+          broadcast(id);
+          emitQueue();
+          kick();
+          return;
+        }
+        autoRetry.delete(id);
+        fail(id, `文件不合格且重下仍失败：${verdict.reason}${detail ? `（${detail}）` : ''}`);
         return;
       }
-      autoRetry.delete(id);
-      fail(id, `文件损坏且重下仍失败${detail ? `：${detail}` : ''}`);
-      return;
+
+      // 没验过（缺 ffprobe）也要说出来 —— 不能让"没验"看起来像"验过了"
+      if (!verdict.verified) {
+        notice(`提示：${verdict.reason}，本次按可用处理`, id);
+      }
     }
 
     const patch = {
