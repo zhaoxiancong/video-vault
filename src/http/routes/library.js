@@ -28,6 +28,9 @@ function register(router, ctx) {
       settings: repo.getSettings(),
       downloads: config.paths.downloads,
       version: require('../../../package.json').version,
+      // 调度器的内存并发状态。**只读诊断**：`ghosts` 非空说明有槽位泄漏
+      // （内存里占着槽位、库里却没有对应的进行中任务）—— 那会让新任务永远排队。
+      scheduler: scheduler.diagnostics ? scheduler.diagnostics() : undefined,
     });
   });
 

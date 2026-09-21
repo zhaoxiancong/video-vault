@@ -314,6 +314,54 @@ function createScheduler(config, deps) {
     return msg;
   }
 
+  /**
+   * 诊断快照：**把内存里的并发状态暴露出来**。
+   *
+   * 起因是一次真实的排障：`/api/queue` 报 `active=2, concurrency=2`，
+   * 可库里只有 1 条进行中的任务、而且它一条事件都没写过（说明压根没启动）。
+   * 结论是 `running` 这个内存 Map 里有个**不属于任何现存任务的幽灵条目**
+   * 占着槽位 —— 但这只是推断：从外面看不到 `running` 里到底有谁。
+   *
+   * 所以这里把"调度器自己以为在跑什么"与"库里实际存在的任务"**并排列出来**，
+   * 对不上就是幽灵。以后遇到"以为有任务在跑但其实没有"不用再猜。
+   *
+   * ⚠️ 只读，无副作用。
+   */
+  function diagnostics() {
+    const dbActive = repo.listByStatuses([
+      STATUS.QUEUED, STATUS.PARSING, STATUS.DOWNLOADING, STATUS.PROCESSING,
+    ]).map((r) => ({ id: r.id, status: r.status }));
+
+    const ids = [...running.keys()];
+    const dbIds = new Set(dbActive.map((r) => r.id));
+    // 幽灵 = 内存里有、但库里已经没有任何进行中的状态对应它
+    const ghosts = ids.filter((id) => !dbIds.has(id));
+
+    return {
+      limit: concurrency(),
+      inMemory: ids.length,
+      dbActive: dbActive.length,
+      slotsFree: Math.max(0, concurrency() - ids.length),
+      /** 内存里占着槽位的任务 id */
+      memoryIds: ids,
+      /** 库里处于进行中状态的任务（含排队中） */
+      dbIds: dbActive,
+      /** ⚠️ 非空 = 槽位泄漏：这些 id 占着槽位却没有对应的进行中任务 */
+      ghosts,
+      timers: timers.size,
+      jobs: ids.map((id) => {
+        const j = running.get(id);
+        return {
+          id,
+          starting: Boolean(j && j.starting),
+          hasChild: Boolean(j && j.child),
+          stage: (j && j.stage) || null,
+          runningMs: j && j.startedAt ? Date.now() - j.startedAt : null,
+        };
+      }),
+    };
+  }
+
   function cleanup(id) {
     const t = timers.get(id);
     if (t) { clearInterval(t); timers.delete(id); }
@@ -659,7 +707,7 @@ function createScheduler(config, deps) {
     on: (...a) => emitter.on(...a),
     off: (...a) => emitter.off(...a),
     // 队列
-    kick, snapshot, activeCount, concurrency,
+    kick, snapshot, activeCount, concurrency, diagnostics,
     // 单任务操作
     pause, resume, cancel, retryFailed, pauseAll, recoverStale,
     // 生命周期
