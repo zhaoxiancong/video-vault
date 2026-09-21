@@ -18,6 +18,9 @@ const path = require('node:path');
 
 const { createApp } = require('../../src/main');
 
+/** 真实的项目根 —— 前端源码在 `src/web/`，只有真 root 才找得到 */
+const APP_ROOT = path.resolve(__dirname, '..', '..');
+
 /** 起一个隔离实例，返回 base URL 和清理函数 */
 async function startApp() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vv-api-'));
@@ -344,6 +347,55 @@ test('静态资源：目录穿越被拦住', async () => {
   try {
     const r = await fetch(`${s.base}/static/..%2f..%2fdata%2fvault.db`);
     assert.ok(r.status === 403 || r.status === 404, `穿越请求应该被拒，实际 ${r.status}`);
+  } finally { await s.cleanup(); }
+});
+
+/**
+ * 上一个测试只检查了 `/static/app.js` 一个文件。
+ *
+ * 但前端是 **10 个模块互相 import** 的图 —— 只要有**任何一个**模块
+ * 没带对 MIME，或者某个相对 import 的路径写错，浏览器就是在那一处炸，
+ * 而服务端和单元测试全都看不出来（历史上踩过：`Cannot use import statement
+ * outside a module`，起因是 `src/web/package.json` 缺 `{"type":"module"}`）。
+ *
+ * 这条把整个模块图走一遍：**每个 .js 的 MIME** + **每条相对 import 都能取到**。
+ * 走真实 HTTP，不碰文件系统 —— 因为浏览器就是走 HTTP 的。
+ */
+test('静态资源：整个前端模块图都能按模块加载（每个 MIME + 每条 import）', async () => {
+  const s = await startApp();
+  try {
+    const webDir = path.join(APP_ROOT, 'src', 'web');
+    const mods = [];
+    (function walk(dir) {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (e.name.endsWith('.js')) mods.push(full);
+      }
+    }(webDir));
+
+    assert.ok(mods.length >= 8, `前端模块数量不对，只找到 ${mods.length} 个`);
+
+    let importsChecked = 0;
+    for (const full of mods) {
+      const rel = path.relative(webDir, full).replace(/\\/g, '/');
+      const url = `${s.base}/static/${rel}`;
+
+      const r = await fetch(url);
+      assert.equal(r.status, 200, `${rel} 取不到（HTTP ${r.status}）`);
+      assert.match(r.headers.get('content-type') || '', /javascript/,
+        `${rel} 的 MIME 不是 javascript —— 浏览器会拒绝把它当模块加载`);
+
+      // 每条**相对** import 都要真的能取到（裸包名不走 HTTP，这里不检查）
+      const code = await r.text();
+      for (const m of code.matchAll(/from\s+['"](\.[^'"]+)['"]/g)) {
+        const resolved = new URL(m[1], `http://x/static/${rel}`).pathname;
+        const rr = await fetch(s.base + resolved);
+        assert.equal(rr.status, 200, `${rel} 里 import 的 ${m[1]}（${resolved}）取不到`);
+        importsChecked += 1;
+      }
+    }
+    assert.ok(importsChecked >= 15, `检查到的 import 太少（${importsChecked}），正则可能没匹配上`);
   } finally { await s.cleanup(); }
 });
 
