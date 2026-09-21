@@ -123,6 +123,47 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   check_interval_min INTEGER DEFAULT 60,
   created_at  TEXT DEFAULT (datetime('now','localtime'))
 );
+
+-- ───────────────────────────── 从网站找视频 ─────────────────────────────
+-- 一次爬取一行。status: running | done | failed
+-- paging_json 存 [{label,url}] —— 用户点哪一页就再发起一次爬取（不自动翻页）
+CREATE TABLE IF NOT EXISTS crawl_runs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  url         TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'running',
+  path        TEXT,
+  site        TEXT,
+  title       TEXT,
+  item_count  INTEGER DEFAULT 0,
+  paging_json TEXT,
+  note        TEXT,
+  error       TEXT,
+  started_at  TEXT DEFAULT (datetime('now','localtime')),
+  finished_at TEXT
+);
+
+-- 候选条目。**故意不复用 videos 表**：候选不是下载任务，
+-- 混进 videos 会污染「我的库」的计数、筛选与查询。
+--   url            UNIQUE：同一条视频被多轮爬到时不重复堆积
+--   site_video_id  站内 id 优先做去重键（slug 会被人改，站内 id 不会）
+--   in_library     爬取时对 videos.url 做一次 IN 查询的快照，不是外键 ——
+--                  用户的库随时在变，界面上还要能手动刷新
+--   added_at       非空 = 已加入下载队列
+CREATE TABLE IF NOT EXISTS candidates (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id         INTEGER NOT NULL REFERENCES crawl_runs(id) ON DELETE CASCADE,
+  url            TEXT NOT NULL UNIQUE,
+  site_video_id  TEXT,
+  title          TEXT,
+  duration_sec   INTEGER,
+  thumb_url      TEXT,
+  source_url     TEXT,
+  in_library     INTEGER DEFAULT 0,
+  added_at       TEXT,
+  created_at     TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_candidates_run ON candidates(run_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_lib ON candidates(in_library);
 `;
 
 /** 路径自愈时认作"本项目自己的"子目录（只有这两个，避免误伤用户的外部目录） */
@@ -588,6 +629,143 @@ function createDatabase(config, options = {}) {
     ).run(keep);
   }
 
+  // ---------------------------------------------------------------- 爬取候选
+
+  /**
+   * 开一次爬取记录，返回 runId。
+   * 先写记录再爬 —— 这样爬取中途失败/进程被杀，也能看出"有一次没跑完的爬取"。
+   */
+  function startCrawlRun({ url }) {
+    const info = db.prepare('INSERT INTO crawl_runs (url) VALUES (?)').run(String(url));
+    return Number(info.lastInsertRowid);
+  }
+
+  function finishCrawlRun(id, {
+    status = 'done', path = null, site = null, title = null,
+    itemCount = 0, paging = null, note = null, error = null,
+  } = {}) {
+    db.prepare(`
+      UPDATE crawl_runs
+         SET status = ?, path = ?, site = ?, title = ?, item_count = ?,
+             paging_json = ?, note = ?, error = ?,
+             finished_at = datetime('now','localtime')
+       WHERE id = ?
+    `).run(
+      String(status), path, site, title, Number(itemCount) || 0,
+      paging ? JSON.stringify(paging) : null, note, error, Number(id),
+    );
+  }
+
+  function getCrawlRun(id) {
+    const row = db.prepare('SELECT * FROM crawl_runs WHERE id = ?').get(Number(id));
+    return row || null;
+  }
+
+  /**
+   * 批量写入候选。
+   *
+   * 用 `INSERT OR IGNORE` + `changes` 统计 inserted/skipped ——
+   * 靠 `url` 的 UNIQUE 约束去重，不先查一遍（那会有并发窗口）。
+   * 放在一个事务里：中途失败不留半拉子结果。
+   */
+  function insertCandidates(runId, items, sourceUrl = null) {
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO candidates
+        (run_id, url, site_video_id, title, duration_sec, thumb_url, source_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    let inserted = 0;
+    let skipped = 0;
+
+    transaction(() => {
+      for (const it of items || []) {
+        if (!it || !it.url) { skipped += 1; continue; }
+        const r = stmt.run(
+          Number(runId), String(it.url), it.site_video_id || null,
+          it.title || null,
+          Number.isFinite(it.duration_sec) ? Math.round(it.duration_sec) : null,
+          it.thumb_url || null, sourceUrl,
+        );
+        if (r.changes > 0) inserted += 1; else skipped += 1;
+      }
+    });
+    return { inserted, skipped };
+  }
+
+  /** 候选行 → 界面用的形状（把 0/1 变成布尔、added_at 变成 added） */
+  function candidateOut(row) {
+    return {
+      id: row.id,
+      run_id: row.run_id,
+      url: row.url,
+      site_video_id: row.site_video_id,
+      title: row.title,
+      duration_sec: row.duration_sec,
+      thumb_url: row.thumb_url,
+      source_url: row.source_url,
+      in_library: Boolean(row.in_library),
+      added: Boolean(row.added_at),
+      created_at: row.created_at,
+    };
+  }
+
+  /**
+   * 查候选。q 走 LIKE（参数化，绝不拼 SQL 字符串）。
+   * @param {object} opts {q, onlyNew, runId, limit, offset}
+   */
+  function listCandidates({ q = '', onlyNew = false, runId = null, limit = 200, offset = 0 } = {}) {
+    const where = [];
+    const params = [];
+
+    const kw = String(q || '').trim();
+    if (kw) {
+      where.push('title LIKE ?');
+      params.push(`%${kw}%`);
+    }
+    if (onlyNew) where.push('in_library = 0');
+    if (runId) { where.push('run_id = ?'); params.push(Number(runId)); }
+
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = db.prepare(`SELECT COUNT(*) c FROM candidates ${clause}`).get(...params).c;
+    const rows = db.prepare(
+      `SELECT * FROM candidates ${clause} ORDER BY id ASC LIMIT ? OFFSET ?`,
+    ).all(...params, Math.max(1, Number(limit) || 200), Math.max(0, Number(offset) || 0));
+
+    return { rows: rows.map(candidateOut), total };
+  }
+
+  function getCandidatesByIds(ids) {
+    const list = (ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (!list.length) return [];
+    const marks = list.map(() => '?').join(',');
+    return db.prepare(`SELECT * FROM candidates WHERE id IN (${marks}) ORDER BY id ASC`)
+      .all(...list)
+      .map(candidateOut);
+  }
+
+  /** 标记已入队。返回受影响条数。 */
+  function markCandidatesAdded(ids) {
+    const list = (ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (!list.length) return 0;
+    const marks = list.map(() => '?').join(',');
+    const r = db.prepare(
+      `UPDATE candidates SET added_at = datetime('now','localtime') WHERE id IN (${marks})`,
+    ).run(...list);
+    return Number(r.changes) || 0;
+  }
+
+  /**
+   * 按 videos.url 重算 in_library。
+   * 一条 UPDATE 搞定，不逐行查（候选可能上百条）。
+   */
+  function refreshLibraryFlags() {
+    const r = db.prepare(`
+      UPDATE candidates
+         SET in_library = EXISTS (SELECT 1 FROM videos WHERE videos.url = candidates.url)
+    `).run();
+    return Number(r.changes) || 0;
+  }
+
   // ---------------------------------------------------------------- 生命周期
 
   function close() {
@@ -607,6 +785,10 @@ function createDatabase(config, options = {}) {
     upsertPlaylist, getPlaylistItems,
     // events
     emitEvent, eventsSince, pruneEvents,
+    // 爬取候选（「从网站找视频」）
+    startCrawlRun, finishCrawlRun, getCrawlRun,
+    insertCandidates, listCandidates, getCandidatesByIds,
+    markCandidatesAdded, refreshLibraryFlags,
     // 事务与生命周期
     transaction, close,
     /** 仅供测试与迁移脚本使用。业务代码不要碰它。 */

@@ -255,3 +255,142 @@ test('两个隔离的库互不影响（这正是重构要买到的能力）', ()
     assert.notEqual(a.config.paths.db, b.config.paths.db);
   } finally { a.cleanup(); b.cleanup(); }
 });
+
+// ---------------------------------------------------------------- 爬取候选
+
+test('候选：插入后能按 runId / 关键字 / 只在库外 查询', () => {
+  const ctx = freshRepo();
+  try {
+    const runId = ctx.repo.startCrawlRun({ url: 'https://x/' });
+    const r = ctx.repo.insertCandidates(runId, [
+      { url: 'https://x/video.aaa/1/1/cat_video', title: 'cat video', duration_sec: 60, site_video_id: '1', thumb_url: null },
+      { url: 'https://x/video.bbb/1/1/dog_video', title: 'dog video', duration_sec: null, site_video_id: '2', thumb_url: null },
+    ], 'https://x/');
+
+    assert.equal(r.inserted, 2);
+    assert.equal(ctx.repo.listCandidates({}).total, 2);
+    assert.equal(ctx.repo.listCandidates({ q: 'cat' }).total, 1);
+    assert.equal(ctx.repo.listCandidates({ runId }).total, 2);
+
+    const rows = ctx.repo.listCandidates({}).rows;
+    assert.equal(rows[0].duration_sec, 60);
+    assert.equal(rows[1].duration_sec, null, '缺失时长保持 null，不能变成 0');
+    // 这两个字段是给前端直接用的，所以是布尔而不是 SQLite 的 0/1
+    assert.equal(rows[0].in_library, false);
+    assert.equal(rows[0].added, false);
+  } finally { ctx.cleanup(); }
+});
+
+test('候选：重复 url 不堆积，第二次插入算 skipped', () => {
+  const ctx = freshRepo();
+  try {
+    const a = ctx.repo.startCrawlRun({ url: 'https://x/' });
+    ctx.repo.insertCandidates(a, [{ url: 'https://x/video.aaa/1/1/same', title: 't' }], 'https://x/');
+    const b = ctx.repo.startCrawlRun({ url: 'https://x/new/2' });
+    const r = ctx.repo.insertCandidates(b, [{ url: 'https://x/video.aaa/1/1/same', title: 't' }], 'https://x/new/2');
+
+    assert.equal(r.inserted, 0);
+    assert.equal(r.skipped, 1);
+    assert.equal(ctx.repo.listCandidates({}).total, 1, '不能变成两条');
+  } finally { ctx.cleanup(); }
+});
+
+test('候选：refreshLibraryFlags 把已在库的标出来，onlyNew 能排除它们', () => {
+  const ctx = freshRepo();
+  try {
+    const url = 'https://x/video.ccc/1/1/in_lib';
+    ctx.repo.insertVideo({ url, title: 'in lib' });
+    const runId = ctx.repo.startCrawlRun({ url: 'https://x/' });
+    ctx.repo.insertCandidates(runId, [{ url, title: 'in lib' }], 'https://x/');
+
+    const n = ctx.repo.refreshLibraryFlags();
+    assert.ok(n >= 1, '至少标出 1 条');
+    assert.equal(ctx.repo.listCandidates({ onlyNew: true }).total, 0, '已在库的应被 onlyNew 排除');
+    assert.equal(ctx.repo.listCandidates({}).rows[0].in_library, true);
+  } finally { ctx.cleanup(); }
+});
+
+test('候选：markCandidatesAdded 之后 added 字段能查出来', () => {
+  const ctx = freshRepo();
+  try {
+    const runId = ctx.repo.startCrawlRun({ url: 'https://x/' });
+    ctx.repo.insertCandidates(runId, [
+      { url: 'https://x/video.a/1/1/one', title: 'one' },
+      { url: 'https://x/video.b/1/1/two', title: 'two' },
+    ], 'https://x/');
+    const ids = ctx.repo.listCandidates({}).rows.map((r) => r.id);
+
+    const n = ctx.repo.markCandidatesAdded([ids[0]]);
+    assert.equal(n, 1);
+    const rows = ctx.repo.listCandidates({}).rows;
+    assert.equal(rows.find((r) => r.id === ids[0]).added, true);
+    assert.equal(rows.find((r) => r.id === ids[1]).added, false);
+  } finally { ctx.cleanup(); }
+});
+
+test('候选：getCandidatesByIds 按 id 取回 url/title（入队要用）', () => {
+  const ctx = freshRepo();
+  try {
+    const runId = ctx.repo.startCrawlRun({ url: 'https://x/' });
+    ctx.repo.insertCandidates(runId, [
+      { url: 'https://x/video.a/1/1/one', title: 'one' },
+      { url: 'https://x/video.b/1/1/two', title: 'two' },
+    ], 'https://x/');
+    const ids = ctx.repo.listCandidates({}).rows.map((r) => r.id);
+
+    const got = ctx.repo.getCandidatesByIds([ids[0], ids[1], 99999]);
+    assert.equal(got.length, 2, '不存在的 id 被忽略而不是报错');
+    assert.equal(got[0].url, 'https://x/video.a/1/1/one');
+    assert.equal(got[0].title, 'one');
+    assert.deepEqual(ctx.repo.getCandidatesByIds([]), []);
+  } finally { ctx.cleanup(); }
+});
+
+test('爬取记录：finishCrawlRun 记录状态、路径、条数与翻页', () => {
+  const ctx = freshRepo();
+  try {
+    const runId = ctx.repo.startCrawlRun({ url: 'https://x/' });
+    const running = ctx.repo.getCrawlRun(runId);
+    assert.equal(running.status, 'running');
+    assert.equal(running.url, 'https://x/');
+
+    ctx.repo.finishCrawlRun(runId, {
+      status: 'done', path: 'html', site: 'x.com', title: '首页',
+      itemCount: 3, paging: [{ label: '第 2 页', url: 'https://x/new/2' }], note: '用页面解析',
+    });
+    const run = ctx.repo.getCrawlRun(runId);
+    assert.equal(run.status, 'done');
+    assert.equal(run.path, 'html');
+    assert.equal(run.item_count, 3);
+    assert.equal(run.note, '用页面解析');
+    assert.equal(JSON.parse(run.paging_json)[0].label, '第 2 页');
+    assert.ok(run.finished_at, '完成时间要被写上');
+  } finally { ctx.cleanup(); }
+});
+
+test('爬取记录：失败时记 error，且 getCrawlRun 对不存在的 id 返回 null', () => {
+  const ctx = freshRepo();
+  try {
+    const runId = ctx.repo.startCrawlRun({ url: 'https://bad/' });
+    ctx.repo.finishCrawlRun(runId, { status: 'failed', error: '目标站在限速（HTTP 429）' });
+    const run = ctx.repo.getCrawlRun(runId);
+    assert.equal(run.status, 'failed');
+    assert.match(run.error, /429|限速/);
+    assert.equal(ctx.repo.getCrawlRun(999999), null);
+  } finally { ctx.cleanup(); }
+});
+
+test('候选：listCandidates 的分页与 limit 生效', () => {
+  const ctx = freshRepo();
+  try {
+    const runId = ctx.repo.startCrawlRun({ url: 'https://x/' });
+    const items = Array.from({ length: 10 }, (_, i) => ({
+      url: `https://x/video.g${i}/1/1/t${i}`, title: `t${i}`,
+    }));
+    ctx.repo.insertCandidates(runId, items, 'https://x/');
+
+    assert.equal(ctx.repo.listCandidates({}).total, 10);
+    assert.equal(ctx.repo.listCandidates({ limit: 4 }).rows.length, 4);
+    assert.equal(ctx.repo.listCandidates({ limit: 4, offset: 8 }).rows.length, 2);
+  } finally { ctx.cleanup(); }
+});
