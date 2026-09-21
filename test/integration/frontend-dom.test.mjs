@@ -95,7 +95,7 @@ test('前端入口能在"类浏览器"环境里跑完，不抛异常', async () 
   } finally { dom.restore(); }
 });
 
-test('index.html 解析出的结构完整（三个标签页 / 三个视图 / 关键容器）', () => {
+test('index.html 解析出的结构完整（四个标签页 / 四个视图 / 关键容器）', () => {
   const doc = new (globalThis.document?.constructor || Object)();
   void doc;
   const parsed = parseHTML(HTML);
@@ -103,11 +103,14 @@ test('index.html 解析出的结构完整（三个标签页 / 三个视图 / 关
   // 用垫片自己的查询能力：把解析结果挂到一个临时 document 上
   const dom = installDom({ html: HTML });
   try {
-    assert.equal(globalThis.document.querySelectorAll('.tab').length, 3, '应有 3 个标签页');
-    assert.equal(globalThis.document.querySelectorAll('.view').length, 3, '应有 3 个视图');
+    assert.equal(globalThis.document.querySelectorAll('.tab').length, 4, '应有 4 个标签页');
+    assert.equal(globalThis.document.querySelectorAll('.view').length, 4, '应有 4 个视图');
     for (const id of ['tabs', 'urlBox', 'btnAdd', 'libGrid', 'libList',
       'setConcurrency', 'btnSaveSettings', 'btnTestCookies',
-      'playerModal', 'player', 'toasts', 'modal', 'engineDot', 'engineText']) {
+      'playerModal', 'player', 'toasts', 'modal', 'engineDot', 'engineText',
+      // 「找视频」页的关键节点
+      'discUrl', 'btnCrawl', 'discStatus', 'discPaging', 'discFilter',
+      'discOnlyNew', 'discList', 'btnDiscAdd', 'btnDiscRefresh', 'btnDiscMore']) {
       assert.ok(globalThis.document.getElementById(id), `index.html 里缺少 #${id}`);
     }
     void root; void parsed;
@@ -385,5 +388,199 @@ test('垫片：元素该有的常用方法都在（缺一个就会产生一堆�
     el.style.display = 'none';
     assert.equal(el.style.display, 'none', 'style 不接受直接赋值 —— 相关行为就测不了');
     el.style.display = '';
+  } finally { dom.restore(); }
+});
+
+// ---------------------------------------------------------------- 「找视频」页
+
+/** 造一批候选，覆盖"未下过 / 已在库 / 已入队"三种状态与缺失时长 */
+function candidateRows() {
+  return [
+    {
+      id: 1, url: 'https://x/video.aaa/1/1/cat_video', title: 'cat video',
+      duration_sec: 60, in_library: false, added: false, created_at: '2026-09-22 10:00',
+    },
+    {
+      id: 2, url: 'https://x/video.bbb/1/1/dog_video', title: 'dog video',
+      duration_sec: null, in_library: true, added: false, created_at: '2026-09-22 10:00',
+    },
+    {
+      id: 3, url: 'https://x/video.ccc/1/1/已入队', title: 'queued item',
+      duration_sec: 125, in_library: true, added: true, created_at: '2026-09-22 10:00',
+    },
+  ];
+}
+
+/** 起一个装好候选数据的「找视频」页环境 */
+async function bootDiscover({ rows = candidateRows(), crawl = null } = {}) {
+  const calls = [];
+  const responses = {
+    ...fakeResponses(),
+    'GET /api/candidates': { total: rows.length, rows },
+    'POST /api/crawl': crawl || {
+      runId: 7, status: 'done', path: 'html', itemCount: rows.length,
+      paging: [{ label: '第 2 页', url: 'https://x/new/2' }],
+      note: '该站没有列表解析器，已改用页面解析',
+    },
+    'POST /api/candidates/action': { requested: 1, added: 1, skipped: 0, retried: 0, errors: [] },
+  };
+  const dom = installDom({ html: HTML, responses });
+  // 记录所有请求，用来断言"关键字筛选没有发新请求"
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { calls.push(`${(init && init.method) || 'GET'} ${String(url).replace(/^https?:\/\/[^/]+/, '')}`); return origFetch(url, init); };
+  const mod = await import(appUrl(`disc-${Date.now()}-${Math.random()}`));
+  await new Promise((r) => setTimeout(r, 20));
+  return { dom, mod, calls };
+}
+
+test('找视频页：候选列表渲染出三条，三种状态标签各自正确', async () => {
+  const { dom } = await bootDiscover();
+  try {
+    const rows = globalThis.document.querySelectorAll('#discList .disc-row');
+    assert.equal(rows.length, 3, '应渲染出 3 条候选');
+
+    const tags = [...globalThis.document.querySelectorAll('#discList .disc-tag')].map((t) => t.textContent);
+    assert.deepEqual(tags, ['＋新', '已在库', '已加入队列']);
+  } finally { dom.restore(); }
+});
+
+test('找视频页：时长缺失显示 ?，不显示 0:00', async () => {
+  const { dom } = await bootDiscover();
+  try {
+    const durs = [...globalThis.document.querySelectorAll('#discList .disc-dur')].map((d) => d.textContent);
+    assert.deepEqual(durs, ['1:00', '?', '2:05']);
+  } finally { dom.restore(); }
+});
+
+test('找视频页：关键字筛选是本地过滤 —— 不发新请求', async () => {
+  const { dom, calls } = await bootDiscover();
+  try {
+    const before = calls.filter((c) => c.includes('/api/candidates')).length;
+
+    const filter = globalThis.document.getElementById('discFilter');
+    filter.value = 'cat';
+    filter.dispatchEvent(new globalThis.Event('input'));
+
+    const after = calls.filter((c) => c.includes('/api/candidates')).length;
+    assert.equal(after, before, '输入关键字不该触发新的候选请求（本地过滤）');
+
+    const rows = globalThis.document.querySelectorAll('#discList .disc-row');
+    assert.equal(rows.length, 1, '只剩匹配 cat 的那条');
+    // ⚠️ 断言**子元素**的 textContent：垫片的 textContent 不聚合子树
+    assert.equal(globalThis.document.querySelector('#discList .disc-title').textContent, 'cat video');
+  } finally { dom.restore(); }
+});
+
+test('找视频页：关键字支持 -词 排除', async () => {
+  const { dom } = await bootDiscover();
+  try {
+    const filter = globalThis.document.getElementById('discFilter');
+    filter.value = 'video -dog';
+    filter.dispatchEvent(new globalThis.Event('input'));
+    const rows = globalThis.document.querySelectorAll('#discList .disc-row');
+    assert.equal(rows.length, 1);
+    assert.equal(globalThis.document.querySelector('#discList .disc-title').textContent, 'cat video');
+  } finally { dom.restore(); }
+});
+
+test('找视频页：勾选后点入队会发 action=add 并带选中的 id', async () => {
+  const { dom, calls } = await bootDiscover();
+  try {
+    const boxes = [...globalThis.document.querySelectorAll('#discList .disc-pick')];
+    assert.equal(boxes.length, 3);
+
+    // 未选中时按钮应当是禁用的
+    assert.equal(globalThis.document.getElementById('btnDiscAdd').disabled, true);
+
+    boxes[0].checked = true;
+    boxes[0].dispatchEvent(new globalThis.Event('change'));
+    boxes[2].checked = true;
+    boxes[2].dispatchEvent(new globalThis.Event('change'));
+
+    const btn = globalThis.document.getElementById('btnDiscAdd');
+    assert.equal(btn.disabled, false, '有勾选就要能点');
+    assert.match(btn.textContent, /2/, '按钮上要显示选中条数');
+
+    btn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const addCall = calls.find((c) => c.startsWith('POST /api/candidates/action'));
+    assert.ok(addCall, '应当发出了入队请求');
+  } finally { dom.restore(); }
+});
+
+test('找视频页：粘网址点「从网站找」会发 POST /api/crawl，并把走了哪条路显示出来', async () => {
+  const { dom, calls } = await bootDiscover();
+  try {
+    const input = globalThis.document.getElementById('discUrl');
+    input.value = 'https://x/';
+    globalThis.document.getElementById('btnCrawl').click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.ok(calls.some((c) => c.startsWith('POST /api/crawl')), '应当发出爬取请求');
+
+    const status = globalThis.document.getElementById('discStatus');
+    assert.equal(status.hidden, false, '状态条要显示出来');
+    // ⚠️ 垫片的 textContent 不聚合子树，所以取状态条里那个 span
+    const line = status.querySelector('span');
+    assert.ok(line, '状态条里应当有个 span');
+    // 走了哪条路必须写出来 —— 用户据此判断为什么没有缩略图
+    assert.match(line.textContent, /页面解析/);
+    assert.match(line.textContent, /找到 3 条/, '要显示找到多少条');
+  } finally { dom.restore(); }
+});
+
+test('找视频页：翻页按钮用那个地址发起**新一次**爬取，且不清空当前候选', async () => {
+  const { dom, calls } = await bootDiscover();
+  try {
+    const input = globalThis.document.getElementById('discUrl');
+    input.value = 'https://x/';
+    globalThis.document.getElementById('btnCrawl').click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const pagingBtns = [...globalThis.document.querySelectorAll('#discPaging [data-page-url]')];
+    assert.ok(pagingBtns.length >= 1, '应当渲染出翻页按钮');
+    assert.equal(pagingBtns[0].textContent, '第 2 页');
+
+    const before = calls.filter((c) => c.startsWith('POST /api/crawl')).length;
+    pagingBtns[0].click();
+    await new Promise((r) => setTimeout(r, 40));
+    const after = calls.filter((c) => c.startsWith('POST /api/crawl')).length;
+    assert.equal(after, before + 1, '翻页是新一次爬取');
+
+    // 候选列表仍然在（翻页不替换当前结果）
+    assert.ok(globalThis.document.querySelectorAll('#discList .disc-row').length > 0,
+      '翻页不该清空当前候选列表');
+  } finally { dom.restore(); }
+});
+
+test('找视频页：202（转后台）时显示进度提示，而不是当成失败', async () => {
+  const { dom } = await bootDiscover({ crawl: { runId: 9, status: 'running' } });
+  try {
+    const input = globalThis.document.getElementById('discUrl');
+    input.value = 'https://slow/';
+    globalThis.document.getElementById('btnCrawl').click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const status = globalThis.document.getElementById('discStatus');
+    assert.equal(status.hidden, false);
+    const line = status.querySelector('span');
+    assert.match(line.textContent, /后台|抓取/, '要说清"转后台了"');
+    assert.doesNotMatch(line.textContent, /失败|错误/);
+  } finally { dom.restore(); }
+});
+
+test('找视频页：候选标题里的尖括号原样保留（防 innerHTML 注入）', async () => {
+  const nasty = '<img src=x onerror=alert(1)> & "引号"';
+  const { dom } = await bootDiscover({
+    rows: [{
+      id: 1, url: 'https://x/video.aaa/1/1/x', title: nasty,
+      duration_sec: 60, in_library: false, added: false, created_at: '2026-09-22 10:00',
+    }],
+  });
+  try {
+    const title = globalThis.document.querySelector('#discList .disc-title');
+    assert.equal(title.textContent, nasty, '文本要原样保留');
+    assert.equal(title.children.length, 0, '不该被解析成子元素（那意味着用了 innerHTML）');
   } finally { dom.restore(); }
 });

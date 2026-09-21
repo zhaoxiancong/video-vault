@@ -91,21 +91,30 @@ export class FakeElement extends FakeNode {
     this.classList = new ClassList(this);
     this.style = makeStyle();
     /**
-     * dataset 必须**双向**映射到 data-* 属性。
+     * dataset 必须**双向**映射到 data-* 属性，而且必须遵守 **kebab-case 转换**。
      *
      * 前端大量用 `closest('[data-view]')`、`querySelectorAll('[data-action]')`
      * 这类**属性选择器**做事件委托。如果 dataset 只是个普通对象、不落到
      * _attrs 上，属性选择器就永远匹配不到 → 事件委托全部失效。
      * 表现出来是"点了没反应"，而真实浏览器里是好的。
      * （第一版就是这个毛病，测试报"库视图应该被激活"。）
+     *
+     * ⚠️ 多词属性要转 kebab-case（真实 DOM 规范如此）：
+     *    `dataset.pageUrl = 'x'` 落到 HTML 上是 `data-page-url="x"`。
+     *    第一版只做 `data-${k}`，于是属性变成 `data-pageUrl`，
+     *    而 `querySelectorAll('[data-page-url]')` 永远匹配不到 ——
+     *    **同一个坑的第二次**，只是这次藏得更深（单词属性看不出问题）。
+     *    所以 set / get / has / ownKeys 四条路径都要转。
      */
+    const kebab = (k) => String(k).replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+    const camel = (k) => String(k).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
     this.dataset = new Proxy({}, {
-      get: (_t, k) => this._attrs[`data-${String(k)}`],
-      set: (_t, k, v) => { this._attrs[`data-${String(k)}`] = String(v); return true; },
-      has: (_t, k) => `data-${String(k)}` in this._attrs,
+      get: (_t, k) => this._attrs[`data-${kebab(k)}`],
+      set: (_t, k, v) => { this._attrs[`data-${kebab(k)}`] = String(v); return true; },
+      has: (_t, k) => `data-${kebab(k)}` in this._attrs,
       ownKeys: () => Object.keys(this._attrs)
         .filter((k) => k.startsWith('data-'))
-        .map((k) => k.slice(5)),
+        .map((k) => camel(k.slice(5))),
       getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
     });
     this.value = '';

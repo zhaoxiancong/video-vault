@@ -21,6 +21,7 @@
 
   <nav class="tabs" id="tabs">
     <button class="tab is-active" data-view="add">添加下载</button>
+    <button class="tab" data-view="discover">找视频</button>
     <button class="tab" data-view="library">我的库 <span class="pill" id="tabLibCount">0</span></button>
     <button class="tab" data-view="settings">设置</button>
   </nav>
@@ -124,6 +125,62 @@
       </div>
       <div id="historyEmpty" class="empty" hidden>还没有已结束的任务。</div>
       <div id="historyList" class="queue" hidden></div>
+    </div>
+  </section>
+
+  <!-- ══════════════ 找视频（从网站抓取） ══════════════ -->
+  <!-- ⚠️ 这里**不能**写 hidden：样式表开头那行 `[hidden] { display: none !important; }`
+       会盖过 `.view.is-active { display: block }`，于是切到这个标签页是**全空白**。
+       视图的显隐一律交给 `.view` / `.view.is-active` 这对规则管。 -->
+  <section class="view" id="view-discover">
+    <div class="panel">
+      <h2 class="panel-title">从网站找视频</h2>
+      <p class="panel-hint">
+        粘一个网页地址 —— 列表页、频道页、站点首页都行。它会找出页面上的视频链接，
+        再用关键字筛出想要的，勾选后加入下载队列。
+        遵守站点爬取纪律：单次只请求一个页面，不自动翻页。
+      </p>
+
+      <div class="controls">
+        <label class="field disc-url">
+          <span>网址</span>
+          <input type="text" id="discUrl" spellcheck="false"
+            placeholder="https://example.com/videos 或某个站点首页">
+        </label>
+        <button class="btn btn-primary" id="btnCrawl">从网站找</button>
+      </div>
+
+      <!-- 爬取状态：走了哪条路、找到几条、有没有被限速 -->
+      <div class="disc-status" id="discStatus" hidden></div>
+
+      <!-- 翻页候选：点一下就用那个地址再抓一次（不替换当前结果） -->
+      <div class="disc-paging" id="discPaging" hidden></div>
+    </div>
+
+    <div class="panel" id="discListPanel" hidden>
+      <div class="disc-bar">
+        <label class="field compact">
+          <span>关键字筛选</span>
+          <input type="search" id="discFilter" placeholder="空格分词，-词 排除">
+        </label>
+        <label class="field field-check compact">
+          <input type="checkbox" id="discOnlyNew">
+          <span>只看未下载</span>
+        </label>
+        <span class="disc-count" id="discCount">共 0 条</span>
+        <span class="toolbar-spacer"></span>
+        <button class="btn btn-sm" id="btnDiscRefresh">刷新库状态</button>
+        <button class="btn btn-sm btn-primary" id="btnDiscAdd" disabled>加入下载队列</button>
+      </div>
+
+      <div class="disc-list" id="discList"></div>
+      <div class="loadmore" id="discMoreWrap" hidden>
+        <button class="btn" id="btnDiscMore">加载更多</button>
+      </div>
+    </div>
+
+    <div class="empty" id="discEmpty" hidden>
+      还没有抓取过。粘一个网址点「从网站找」试试。
     </div>
   </section>
 

@@ -171,6 +171,29 @@ for (const m of html.matchAll(/<link\b[^>]*>/g)) {
 }
 if (!problems) ok.push('index.html 声明的图标文件真实存在（浏览器不会再去要 /favicon.ico）');
 
+// ---------------------------------------------------------------- 6
+
+/**
+ * 视图区块**不能**带 hidden 属性。
+ *
+ * 样式表开头有 `[hidden] { display: none !important; }`（那是整个界面能用的前提），
+ * 而它的 `!important` 会盖过 `.view.is-active { display: block; }` ——
+ * 于是给 `<section class="view" hidden>` 加 hidden，切到那个标签页就是**全空白**。
+ *
+ * 这个坑真实发生过（「找视频」页第一次上线），而且**所有测试都抓不到**：
+ * DOM 垫片没有 CSS 级联，`check-frontend.js` 当时也只查 #id 与 import 路径。
+ * 只有真实浏览器的截图能看见。所以在这里把它静态化。
+ *
+ * 视图显隐一律交给 `.view` / `.view.is-active` 这对规则。
+ */
+for (const m of html.matchAll(/<section\b[^>]*class=["'][^"']*\bview\b[^"']*["'][^>]*>/gi)) {
+  if (/\shidden(\s|>|=)/i.test(m[0])) {
+    fail(`index.html 里的视图区块带了 hidden 属性：${m[0].slice(0, 80)}…`
+      + ' —— [hidden]{display:none!important} 会盖过 .view.is-active，切过去是全空白');
+  }
+}
+if (!problems) ok.push('没有视图区块带 hidden 属性（不会被 [hidden]!important 盖成空白页）');
+
 // ---------------------------------------------------------------- 汇总
 
 console.log('');

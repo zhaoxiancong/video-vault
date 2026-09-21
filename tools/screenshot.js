@@ -194,6 +194,28 @@ async function main() {
     // ---- 添加下载
     await shot('shot-add');
 
+    // ---- 找视频（候选列表要先有数据才看得出样子）
+    await clickView('discover');
+    await evalJs(`
+      (async () => {
+        // 用后端已有的候选；没有就造几条，好让截图能看出三种状态标签
+        const res = await fetch('/api/candidates?limit=8');
+        const data = await res.json();
+        if (!data.rows || !data.rows.length) {
+          await fetch('/api/crawl', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: 'https://www.xvideos.com/' }),
+          }).catch(() => {});
+        }
+        // 切回该页触发一次重载
+        document.querySelector('.tab[data-view="library"]').click();
+        document.querySelector('.tab[data-view="discover"]').click();
+        return true;
+      })()
+    `);
+    await sleep(3000);
+    await shot('shot-discover');
+
     // ---- 提交报告（四种结果各来一条，验 .rep-* 那套样式）
     // 这是"只有提交过才看得见"的面，用前端自己的 renderReport 塞一份假数据最省事
     await evalJs(`
@@ -216,7 +238,6 @@ async function main() {
     // ---- 我的库（网格）—— 用户报的那个 bug 就在这一屏
     await clickView('library');
     await shot('shot-library-grid');
-
     // ---- 我的库（列表）
     await evalJs(`document.querySelector('[data-layout="list"]').click()`);
     await sleep(900);
@@ -225,10 +246,17 @@ async function main() {
     // ---- 「更多」面板（对话框 + 表单）
     await evalJs(`document.querySelector('[data-layout="grid"]').click()`);
     await sleep(600);
-    await evalJs(`document.querySelector('#libGrid .card [data-lib="more"]').click()`);
-    await sleep(900);
-    await shot('shot-more-panel');
-    await evalJs(`document.getElementById('modal').hidden = true`);
+    // ⚠️ 库里可能一条都没有（空实例）——那样就没有卡片可点。
+    //    不判断就点会抛 Uncaught，把整个截图流程打断（剩下的页全截不到）。
+    const cardCount = await evalJs(`document.querySelectorAll('#libGrid .card').length`);
+    if (cardCount > 0) {
+      await evalJs(`document.querySelector('#libGrid .card [data-lib="more"]').click()`);
+      await sleep(900);
+      await shot('shot-more-panel');
+      await evalJs(`document.getElementById('modal').hidden = true`);
+    } else {
+      console.log('  · 库里没有卡片，跳过「更多」面板截图');
+    }
 
     // ---- 确认框
     await evalJs(`

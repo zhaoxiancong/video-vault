@@ -19,9 +19,8 @@ import {
   onProgress, onQueueSnapshot, showLog, setConnected,
 } from './views/queue.js';
 import { initLibraryView, reload as reloadLibrary, renderLibrary } from './views/library.js';
-import {
-  initSettingsView, fillSettings, renderEngineStatus, renderPresets,
-} from './views/settings.js';
+import { initSettingsView, fillSettings, renderEngineStatus, renderPresets } from './views/settings.js';
+import { initDiscoverView, onCrawlEvent, renderList as renderDiscover } from './views/discover.js';
 import { initPlayer, openPlayer } from './views/player.js';
 
 // ---------------------------------------------------------------- 接线
@@ -37,6 +36,7 @@ function boot() {
     onDeleted: () => goLibrary(),
   });
   initLibraryView({ onPlay: (id, src) => openPlayer(id, src) });
+  initDiscoverView();
   initSettingsView();
   initPlayer();
 
@@ -60,6 +60,8 @@ function switchView(name) {
 
   // 切到库页时刷新一次（别的操作可能改了数据）
   if (name === 'library') reloadLibrary({ reset: true });
+  // 切到「找视频」时重绘一次候选（关键字筛选是本地过滤，重绘很便宜）
+  if (name === 'discover') renderDiscover();
 }
 
 // ---------------------------------------------------------------- 数据加载
@@ -117,6 +119,8 @@ function connect() {
       }
     },
     notice: (n) => toast(n.message, 'warn'),
+    // 爬取进度（慢站超过 20 秒时后端会 202，之后靠这个事件推进界面）
+    crawl: (e) => onCrawlEvent(e),
     settings: (s) => fillSettings(s),
     library: () => goLibrary(),
     connected: () => {

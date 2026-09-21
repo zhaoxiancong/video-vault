@@ -774,6 +774,117 @@ select {
   word-break: break-word;
 }
 
+/* ───────────────────────────── 找视频 ───────────────────────────── */
+
+/* 网址输入框要占满剩余宽度（它是这一页的主输入） */
+.disc-url { flex: 1; min-width: 260px; }
+
+/* 爬取状态条：走了哪条路、找到几条、有没有被限速 */
+.disc-status {
+  margin-top: 14px;
+  padding: 10px 13px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--amber);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;   /* 里面会有网址和引擎原话 */
+}
+.disc-status.bad { border-left-color: var(--red); color: var(--text); }
+
+/* 翻页候选：点一下就用那个地址再抓一次 */
+.disc-paging {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.disc-paging-label { font-size: 12.4px; color: var(--text-3); }
+
+/* 工具栏：关键字筛选 + 只看未下载 + 计数 + 两个按钮 */
+.disc-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.disc-bar .field { min-width: 190px; }
+.disc-count { font-size: 12.5px; color: var(--text-3); white-space: nowrap; padding-bottom: 9px; }
+
+.disc-list { display: flex; flex-direction: column; gap: 6px; }
+
+.disc-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  transition: border-color .14s;
+}
+.disc-row:hover { border-color: #333b45; }
+
+.disc-check { display: flex; align-items: center; flex: none; }
+.disc-pick { width: auto; accent-color: var(--amber); cursor: pointer; }
+
+/* 时长：固定宽度，让标题左边缘对齐；缺失时显示 ? */
+.disc-dur {
+  flex: none;
+  width: 52px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.disc-main { flex: 1; min-width: 0; }
+.disc-title {
+  font-size: 13.2px;
+  font-weight: 540;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.disc-url {
+  font-size: 11.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.disc-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.disc-date { font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+/* 「＋新」/「已在库」/「已加入队列」三个状态一眼可辨 */
+.disc-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 20px;
+  white-space: nowrap;
+  background: var(--panel-2);
+  color: var(--text-2);
+}
+.disc-tag.new { color: var(--amber); background: var(--amber-glow); }
+.disc-tag.ok { color: var(--green); background: rgba(63,185,80,.12); }
+.disc-tag.muted { color: var(--text-3); }
+
+@media (max-width: 720px) {
+  .disc-dur { width: 44px; }
+  .disc-url { display: none; }   /* 窄屏只留标题，别把行挤爆 */
+}
+
 /* ───────────────────────────── 提示条 ───────────────────────────── */
 
 .toasts {
