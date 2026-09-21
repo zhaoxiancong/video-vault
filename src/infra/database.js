@@ -244,10 +244,23 @@ function createDatabase(config, options = {}) {
       if (norm.toLowerCase().startsWith(rootLower + path.sep)) return null;
 
       for (const sub of OWN_SUBDIRS) {
-        const marker = path.sep + sub + path.sep;
-        const idx = norm.toLowerCase().indexOf(marker.toLowerCase());
-        if (idx === -1) continue;
-        const rel = norm.slice(idx + 1);
+        /**
+         * 锚点匹配：`\<sub>` 后面要么是分隔符，要么就**到头了**。
+         *
+         * ⚠️ 这是修一个真实 bug（老代码也有）：
+         *    原来只找 `\<sub>\`（带尾分隔符），于是 `settings.downloadDir`
+         *    指向 `...\项目\downloads` **本身**时匹配不上（路径以 `downloads` 结尾，
+         *    后面没有反斜杠）→ 自愈静默跳过 → 用户把项目文件夹挪走之后，
+         *    downloadDir 还指着旧位置，**新下载会落到已经不存在的路径上**。
+         *
+         *    而 file_path / log_path 这些带文件名的路径末尾有分隔符，所以一直正常 ——
+         *    这也解释了为什么这个 bug 一直没被发现。
+         */
+        const re = new RegExp(`${path.sep.replace(/\\/g, '\\\\')}${sub}(${path.sep.replace(/\\/g, '\\\\')}|$)`, 'i');
+        const m = re.exec(norm);
+        if (!m) continue;
+        // m.index 指向分隔符；+1 跳过它，得到以 <sub> 开头的相对路径
+        const rel = norm.slice(m.index + 1);
         const subAbs = path.join(config.root, sub);
         if (!fs.existsSync(subAbs)) continue;   // 当前根下没有该子目录，不动
         return path.join(config.root, rel);

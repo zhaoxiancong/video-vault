@@ -172,7 +172,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 20260920_视频下载工具/
 ├── 启动.cmd / 启动.ps1      ← 双击这个
 ├── src/                     ← 程序本体
-├── test/                    ← 测试（76 项）
+├── test/                    ← 测试（133 项）
 ├── tools/                   ← 辅助脚本（引擎安装、重建库、静态检查）
 ├── downloads/               ← 视频都在这（可在设置里改）
 │   └── _converted/          ← 转码产物
@@ -199,15 +199,16 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 ## 5. 测试与静态检查
 
 ```powershell
-npm test                    # 全部 76 项
+npm test                    # 全部 133 项
 node test/run.js unit       # 只跑单元测试
 node test/run.js integration # 只跑集成测试
 node test/run.js --verbose  # 带完整输出
 
 npm run check               # 静态检查（两个都跑）
-node tools/lint-undefined.js   # 有没有"调用了未定义函数"（含漏导入）
+node tools/lint-undefined.js   # 有没有"调用了未定义函数"（含漏导入模块）
 node tools/check-frontend.js   # 前端一致性（#id 对得上吗、import 路径对不对）
 node test/ui/smoke.js <url>    # 真实浏览器冒烟（需要放宽权限的会话）
+node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 ```
 
 | 层 | 文件 | 项数 | 依赖 |
@@ -215,10 +216,19 @@ node test/ui/smoke.js <url>    # 真实浏览器冒烟（需要放宽权限的�
 | 单元 | `test/unit/job-state.test.js` | 9 | 无 |
 | 单元 | `test/unit/errors.test.js` | 8 | 无 |
 | 单元 | `test/unit/progress.test.js` | 21 | 无 |
+| 单元 | `test/unit/downloader.test.js` | 24 | 无（只拼参数，不起进程） |
+| 单元 | `test/unit/media.test.js` | 14 | 无（ffprobe 用于真实文件判定） |
 | 集成 | `test/integration/database.test.js` | 15 | 临时目录里的独立数据库 |
 | 集成 | `test/integration/api.test.js` | 23 | 临时目录里的独立实例，走真实 HTTP |
+| 集成 | `test/integration/path-healing.test.js` | 7 | 两个临时目录，模拟项目被搬走 |
+| 集成 | `test/integration/media-and-transcode.test.js` | 10 | 用 ffmpeg 现场生成真视频 |
+| 端到端 | `test/e2e/download.test.js` | 2 | **联网**，真的下载一个视频 |
 
 **所有测试都在临时目录里跑**，不碰你的真实库。这是重构带来的直接好处。
+
+> `test/e2e/download.test.js` 断言的是完整闭环：下载 → 合并 → ffprobe 入库 →
+> 网页播放 Range → 库查询去重 → 中间分片被清理。它默认**会跑**（约 12 秒）；
+> 不想走流量就设 `VAULT_SKIP_E2E=1`。
 
 ### 没有浏览器时怎么办
 
@@ -403,6 +413,37 @@ yt-dlp 只认 `/video/<id>`。`normalizeUrl()` 会自动转换，界面上也会
 
 正确做法：明确把记录设成你想测的那个终态，再测目标逻辑。
 
+### 坑 19：转码产物打不开 —— 输出路径被传了两次
+
+**症状**：转码显示成功、`_converted/` 里也真的有文件、大小也正常，
+但打不开。ffprobe 说 `Invalid mvhd time scale -1108944568`，streams 为 0。
+
+**根因**：`startTranscode()` 里拼参数时，输出路径出现了两次：
+
+```js
+// 错误写法：preset.args(outPath) 的契约就是"以输出路径结尾"
+const args = ['-y','-hide_banner','-i', src, ...preset.args(outPath), outPath];
+//                                                                  ^^^^^^^ 多余
+```
+
+于是 ffmpeg 拿到两个输出、指向同一个文件，写了两遍。日志里能直接看到：
+
+```
+Output #1, mp4, to '....mp4'
+Output #0, mp4, to '....mp4'      ← 同一个文件
+```
+
+mp4 的 moov atom 因此被写坏，产物是个废文件。
+
+**为什么长期没被发现**：老的 `selftest.js` 测转码时是**直接调 ffmpeg、自己拼参数**的，
+从来没有走过 `startTranscode()` 这条真实路径。测试跑得再多，
+只要它绕过了出问题的代码，就等于没测。
+
+**顺带修的**：`media.probe()` 原来是直接 `JSON.parse(整段 ffprobe 输出)`。
+ffprobe 即使加了 `-v error`，也可能在 JSON **前面**吐一行警告
+（就是上面那个 `Invalid mvhd time scale`），于是 parse 失败 → `probe` 返回 null →
+**一个完全正常的视频被判成"损坏"、删掉、重下**。现在从第一个 `{` 开始截取。
+
 ---
 
 ## 7. 设置项
@@ -443,7 +484,7 @@ yt-dlp 只认 `/video/<id>`。`normalizeUrl()` 会自动转换，界面上也会
 
 ```powershell
 npm start                          # 启动服务
-npm test                           # 全部测试（76 项）
+npm test                           # 全部测试（133 项）
 npm run check                      # 静态检查
 npm run setup                      # 只下载引擎
 

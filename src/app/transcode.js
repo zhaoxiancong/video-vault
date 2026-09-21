@@ -125,7 +125,27 @@ function createTranscodeService(config, deps) {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     const logPath = path.join(paths.logs, `transcode-${video.id}.log`);
 
-    const args = ['-y', '-hide_banner', '-i', video.file_path, ...preset.args(outPath), outPath];
+    /**
+     * ⚠️ 输出路径**只能出现一次**。
+     *
+     * 这里曾经（从最初版本就有）写成：
+     *     ['-y','-hide_banner','-i', src, ...preset.args(outPath), outPath]
+     * 而 `preset.args(out)` 的契约是"返回一条完整的 ffmpeg 命令参数，
+     * 以输出路径结尾"（有测试钉住），所以 outPath 被追加了**两次**。
+     *
+     * 后果：ffmpeg 得到两个输出、指向同一个文件，写了两遍。
+     * 日志里能直接看到：
+     *     Output #1, mp4, to '....mp4'
+     *     Output #0, mp4, to '....mp4'      ← 同一个文件
+     * 于是 mp4 的 moov atom 被写坏，ffprobe 报
+     *     Invalid mvhd time scale -1108944568, defaulting to 1   （streams 为 0）
+     * 用户拿到的是一个**打不开的转码产物**。
+     *
+     * 这个 bug 一直没被发现，是因为老的 selftest 是**直接调 ffmpeg**、
+     * 自己拼参数的，从来没有走过 startTranscode() 这条路。
+     * 这次补上"经过服务层"的转码测试才把它逼出来。
+     */
+    const args = ['-y', '-hide_banner', '-i', video.file_path, ...preset.args(outPath)];
     const { child } = spawnToFile(paths.ffmpeg, args, { logPath });
 
     running.set(video.id, { child, outPath, presetName });

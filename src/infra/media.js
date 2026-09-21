@@ -93,9 +93,24 @@ function createMediaTools(config) {
     const text = (r.stdout || '').trim();
     if (!text) return null;
 
+    /**
+     * ⚠️ 必须从第一个 `{` 开始截取，不能直接 JSON.parse 整段输出。
+     *
+     * ffprobe 即使加了 `-v error` 也可能在 JSON **前面**吐一行警告，例如：
+     *   [mov,mp4,m4a,3gp,3g2,mj2 @ 00000189…] Invalid mvhd time scale -1108944568, defaulting to 1
+     *   {
+     *       "streams": [...]
+     *   }
+     * 直接 parse 整段会以 "Unexpected token 'm'" 失败 → probe 返回 null →
+     * 一个**完全正常**的视频被判成"损坏"，然后被删掉重下。
+     * 这个坑是在转码测试里撞出来的（转码产物带这种警告）。
+     */
+    const start = text.indexOf('{');
+    if (start === -1) return null;
+
     let data;
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(text.slice(start));
     } catch {
       return null;
     }
