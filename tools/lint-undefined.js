@@ -277,7 +277,13 @@ function isDeclared(src, name) {
     //    （形如 `        trace('x');`，同样以缩进+名字+左括号开头）误判成方法声明，
     //    导致 linter 完全抓不到漏删的调试调用 —— 这是它自己的一个真 bug。
     //    判别关键：方法声明是 `name(...) {`，调用是 `name(...);`。
-    new RegExp(`^[ \\t]*(?:async\\s+|static\\s+|get\\s+|set\\s+)?${n}\\s*\\([^;{}]*\\)\\s*\\{`, 'm'),
+    //
+    // ⚠️ 参数里允许出现花括号与裸对象：`startCrawlRun({ url }) { ... }` 这种
+    //    **对象方法简写**很常见（测试里的假对象几乎都这么写）。原来写成
+    //    `[^;{}]*` 会把这类定义漏掉、误报成"调用了未定义函数"。
+    //    要害仍然由结尾的 `)\s*\{` 把住：调用行是 `name(...);`，不会匹配到。
+    //    两边的判别标准要保持一致（下面的候选过滤也是 `)\s*\{\s*$`）。
+    new RegExp(`^[ \\t]*(?:async\\s+|static\\s+|get\\s+|set\\s+)?${n}\\s*\\([^)]*\\)\\s*\\{`, 'm'),
     new RegExp(`\\bimport\\s+${n}\\b`),
     new RegExp(`\\bimport\\s*\\{[^}]*\\b${n}\\b`),
     new RegExp(`\\b${n}\\s*:\\s*(?:async\\s*)?(?:\\(|function)`), // 对象属性 foo: function / foo: () =>

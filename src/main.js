@@ -22,6 +22,8 @@ const urldiag = require('./infra/urldiag');
 const { createDownloader } = require('./app/downloader');
 const { createScheduler } = require('./app/scheduler');
 const { createTranscodeService } = require('./app/transcode');
+const { createCrawler } = require('./app/crawler');
+const { createDiscovery } = require('./app/discovery');
 const { createServer } = require('./http/server');
 
 /** 应用根目录 = src/ 的上一级（里面有 tools/、downloads/、data/） */
@@ -74,8 +76,20 @@ function createApp(overrides = {}) {
   const scheduler = createScheduler(config, { repo, downloader, media, settings, downloadDir, urldiag });
   const transcode = createTranscodeService(config, { repo, media, settings, downloadDir });
 
+  // 「从网站找视频」：抓取实现 + 任务生命周期。
+  // crawler 与 discovery 分开，是为了让抓取逻辑能脱离服务器单独测
+  // （给个 URL 或假 fetch 就能测，不需要起 HTTP）。
+  const crawler = overrides.crawler || createCrawler({
+    paths: config.paths,
+    fetchImpl: overrides.fetchImpl,
+  });
+  const discovery = overrides.discovery || createDiscovery({
+    repo, crawler,
+    syncWaitMs: overrides.syncWaitMs,     // 测试里注入小值，绝不等真 20 秒
+  });
+
   const http = createServer({
-    config, repo, scheduler, transcode, downloader, urldiag, migrations, dupMerged,
+    config, repo, scheduler, transcode, downloader, urldiag, migrations, dupMerged, discovery,
   });
 
   // 启动时把上次没跑完的任务标成 paused —— **手动点继续才续，不偷偷跑流量**

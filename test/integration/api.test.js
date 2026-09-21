@@ -21,12 +21,18 @@ const { createApp } = require('../../src/main');
 /** 真实的项目根 —— 前端源码在 `src/web/`，只有真 root 才找得到 */
 const APP_ROOT = path.resolve(__dirname, '..', '..');
 
-/** 起一个隔离实例，返回 base URL 和清理函数 */
-async function startApp() {
+/**
+ * 起一个隔离实例，返回 base URL 和清理函数。
+ *
+ * @param {object} [overrides] 透传给 createApp —— 爬取测试用它注入**假 crawler**，
+ *                             这样接口测试完全不联网。
+ */
+async function startApp(overrides = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vv-api-'));
   const app = createApp({
     data: path.join(tmp, 'data'),
     downloads: path.join(tmp, 'downloads'),
+    ...overrides,
   });
   const addr = await app.listen(0, '127.0.0.1');
   const base = `http://127.0.0.1:${addr.port}`;
@@ -438,4 +444,166 @@ test('两个隔离实例互不干扰（并发起两个也不串数据）', async
     assert.equal(la.data.total, 1);
     assert.equal(lb.data.total, 0, 'B 不该看到 A 的数据');
   } finally { await a.cleanup(); await b.cleanup(); }
+});
+
+// ---------------------------------------------------------------- 从网站找视频
+
+/** 假 crawler：不联网，返回固定候选 */
+function fakeCrawler({ items, delay = 0, error = null } = {}) {
+  return {
+    async analyzeSource() {
+      if (delay) await new Promise((r) => setTimeout(r, delay));
+      if (error) throw error;
+      return {
+        path: 'html', title: null, site: 'x.com',
+        items: items || [
+          { url: 'https://x/video.aaa/1/1/one', title: 'one', duration_sec: 60, site_video_id: '1', thumb_url: null },
+          { url: 'https://x/video.bbb/1/1/two', title: 'two', duration_sec: null, site_video_id: '2', thumb_url: null },
+        ],
+        paging: [{ label: '第 2 页', url: 'https://x/new/2' }],
+        note: '该站没有列表解析器，已改用页面解析',
+      };
+    },
+    stop() {},
+  };
+}
+
+test('POST /api/crawl 缺 url 返回 400 而不是静默成功', async () => {
+  const s = await startApp({ crawler: fakeCrawler() });
+  try {
+    const r = await s.call('POST', '/api/crawl', {});
+    assert.equal(r.status, 400);
+    assert.ok(r.data.error);
+    assert.ok(r.data.hint, '要告诉用户下一步做什么');
+  } finally { await s.cleanup(); }
+});
+
+test('POST /api/crawl 抓取成功返回 200 + runId，且候选已入库、带翻页信息', async () => {
+  const s = await startApp({ crawler: fakeCrawler() });
+  try {
+    const r = await s.call('POST', '/api/crawl', { url: 'https://x/' });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.status, 'done');
+    assert.equal(r.data.path, 'html');
+    assert.equal(r.data.itemCount, 2);
+    assert.match(r.data.note, /解析器|页面/);
+    assert.equal(r.data.paging.length, 1);
+    assert.ok(r.data.runId >= 1);
+
+    // 候选走单独的接口取（POST 响应里不含 items —— 两种状态同形）
+    assert.equal(r.data.items, undefined, 'POST 响应不该塞进 whole items');
+
+    const list = await s.call('GET', `/api/candidates?runId=${r.data.runId}`);
+    assert.equal(list.data.total, 2);
+    assert.equal(list.data.rows[0].title, 'one');
+    assert.equal(list.data.rows[0].in_library, false);
+    assert.equal(list.data.rows[1].duration_sec, null, '缺失时长是 null');
+  } finally { await s.cleanup(); }
+});
+
+test('GET /api/crawl/:id 能查到状态（进程重启后的兜底也走这条路）', async () => {
+  const s = await startApp({ crawler: fakeCrawler() });
+  try {
+    const start = await s.call('POST', '/api/crawl', { url: 'https://x/' });
+    const got = await s.call('GET', `/api/crawl/${start.data.runId}`);
+    assert.equal(got.status, 200);
+    assert.equal(got.data.status, 'done');
+    assert.equal(got.data.itemCount, 2);
+
+    const missing = await s.call('GET', '/api/crawl/999999');
+    assert.equal(missing.status, 404);
+  } finally { await s.cleanup(); }
+});
+
+test('POST /api/crawl 抓取失败时返回 400/502 且带 hint，不是 500', async () => {
+  const { AppError } = require('../../src/domain/errors');
+  const s = await startApp({
+    crawler: fakeCrawler({
+      error: new AppError('目标站在限速（HTTP 429）—— 不是工具的问题', {
+        kind: 'crawl-rate-limited', hint: '等几分钟再试。',
+      }),
+    }),
+  });
+  try {
+    const r = await s.call('POST', '/api/crawl', { url: 'https://x/' });
+    assert.ok(r.status === 502 || r.status === 400, `状态应是 400/502，实际 ${r.status}`);
+    assert.match(r.data.error, /429|限速/);
+    assert.ok(r.data.hint);
+  } finally { await s.cleanup(); }
+});
+
+test('GET /api/candidates 支持 q / onlyNew 筛选', async () => {
+  const s = await startApp({ crawler: fakeCrawler() });
+  try {
+    await s.call('POST', '/api/crawl', { url: 'https://x/' });
+    assert.equal((await s.call('GET', '/api/candidates')).data.total, 2);
+    assert.equal((await s.call('GET', '/api/candidates?q=one')).data.total, 1);
+    assert.equal((await s.call('GET', '/api/candidates?q=nothing')).data.total, 0);
+    assert.equal((await s.call('GET', '/api/candidates?onlyNew=1')).data.total, 2);
+    assert.equal((await s.call('GET', '/api/candidates?limit=1')).data.rows.length, 1);
+  } finally { await s.cleanup(); }
+});
+
+test('POST /api/candidates/action add 把候选真的送进下载队列，并标记 added', async () => {
+  // ⚠️ 这条是 Review Focus 5 的钉子：候选入队必须走**和"粘链接"完全相同**的那条路，
+  //    否则会绕过去重、归一化和 scheduler.kick()。
+  const s = await startApp({ crawler: fakeCrawler() });
+  try {
+    await s.call('POST', '/api/crawl', { url: 'https://x/' });
+    const list = await s.call('GET', '/api/candidates');
+    const ids = list.data.rows.map((r) => r.id);
+
+    const r = await s.call('POST', '/api/candidates/action', { action: 'add', ids });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.added, 2);
+
+    // 队列里真的多出这两条
+    const lib = await s.call('GET', '/api/library');
+    assert.equal(lib.data.total, 2, '候选应当真的进了视频库');
+
+    // 候选被标记为已入队，并且刷新后在库标记为 true
+    const after = await s.call('GET', '/api/candidates');
+    assert.ok(after.data.rows.every((row) => row.added === true), '勾选过的要标记已入队');
+    assert.ok(after.data.rows.every((row) => row.in_library === true), '入队后应标为已在库');
+  } finally { await s.cleanup(); }
+});
+
+test('POST /api/candidates/action 参数不对时明确报错', async () => {
+  const s = await startApp({ crawler: fakeCrawler() });
+  try {
+    await s.call('POST', '/api/crawl', { url: 'https://x/' });
+
+    const noAction = await s.call('POST', '/api/candidates/action', { ids: [1] });
+    assert.equal(noAction.status, 400);
+    assert.match(noAction.data.error, /动作/);
+
+    const badAction = await s.call('POST', '/api/candidates/action', { action: 'nuke', ids: [1] });
+    assert.equal(badAction.status, 400);
+
+    const noIds = await s.call('POST', '/api/candidates/action', { action: 'add', ids: [] });
+    assert.equal(noIds.status, 400);
+    assert.match(noIds.data.error, /选中/);
+
+    const ghost = await s.call('POST', '/api/candidates/action', { action: 'add', ids: [999999] });
+    assert.equal(ghost.status, 404);
+  } finally { await s.cleanup(); }
+});
+
+test('慢爬取：超过等待窗口返回 202 + runId，候选随后仍会入库', async () => {
+  const s = await startApp({
+    crawler: fakeCrawler({ delay: 120 }),
+    syncWaitMs: 20,          // 注入小值 —— 测试里绝不等真 20 秒
+  });
+  try {
+    const r = await s.call('POST', '/api/crawl', { url: 'https://x/' });
+    assert.equal(r.status, 202, '超过窗口就是 202');
+    assert.equal(r.data.status, 'running');
+    assert.ok(r.data.runId >= 1);
+    assert.equal(r.data.items, undefined);
+
+    // 等后台跑完，候选应当已经入库了（关掉浏览器也不影响）
+    await new Promise((res) => setTimeout(res, 300));
+    const list = await s.call('GET', `/api/candidates?runId=${r.data.runId}`);
+    assert.equal(list.data.total, 2, '后台跑完的候选也要入库');
+  } finally { await s.cleanup(); }
 });

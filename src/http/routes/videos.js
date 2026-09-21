@@ -22,10 +22,12 @@ const ACTIONS = ['pause', 'resume', 'cancel', 'retry', 'star', 'notes'];
 function register(router, ctx) {
   const { repo, scheduler, transcode, downloader, urldiag, broadcast, settings } = ctx;
 
-  // ---------------------------------------------------------------- 添加链接
-
   /**
-   * 批量添加。
+   * 把一批链接加入下载队列 —— **唯一的入队实现**。
+   *
+   * ⚠️ 抽成函数是为了让「从网站找视频」的批量入队复用它，而不是复制一遍逻辑：
+   *    复制出来的第二份会绕过去重、URL 归一化和 `scheduler.kick()`，
+   *    表现为"候选点了加入队列，但任务一直不动"。
    *
    * 三种结果要分别告诉用户，不能混成一句"成功"：
    *   added    新入库的
@@ -33,17 +35,15 @@ function register(router, ctx) {
    *   retried  库里已有但是失败/暂停状态 —— **重新粘同一个链接就等于重试**
    *            （否则用户会以为"粘了没反应"，尤其在他刚升级完工具、
    *             而当年的失败是旧版本 bug 造成的时候）
+   *
+   * @param {string[]} rawUrls
+   * @param {{kind?:string, quality?:string, forcePlaylist?:boolean}} opts
+   * @returns {Promise<object>} report
    */
-  router.post('/api/videos', async (req, res) => {
-    const body = await readJsonBody(req);
-    const opts = validate(body, {
-      kind: { type: 'string', enum: ['video', 'audio'] },
-      quality: { type: 'string', maxLength: 20 },
-      forcePlaylist: { type: 'boolean' },
-    });
-
-    const rawList = Array.isArray(body.urls) ? body.urls : String(body.urls || '').split(/[\r\n]+/);
-    const raws = rawList.map((s) => String(s).trim()).filter((s) => /^https?:\/\//i.test(s));
+  async function addUrls(rawUrls, opts = {}) {
+    const raws = (Array.isArray(rawUrls) ? rawUrls : [])
+      .map((s) => String(s).trim())
+      .filter((s) => /^https?:\/\//i.test(s));
     if (!raws.length) {
       throw new ValidationError('没有识别到有效的链接', {
         hint: '请粘贴以 http:// 或 https:// 开头的完整视频地址，一行一个。',
@@ -114,8 +114,24 @@ function register(router, ctx) {
 
     scheduler.kick();
     broadcast('library', { changed: true });
+    return report;
+  }
+
+  // ---------------------------------------------------------------- 添加链接
+
+  router.post('/api/videos', async (req, res) => {
+    const body = await readJsonBody(req);
+    const opts = validate(body, {
+      kind: { type: 'string', enum: ['video', 'audio'] },
+      quality: { type: 'string', maxLength: 20 },
+      forcePlaylist: { type: 'boolean' },
+    });
+
+    const rawList = Array.isArray(body.urls) ? body.urls : String(body.urls || '').split(/[\r\n]+/);
+    const report = await addUrls(rawList, opts);
     return json(res, 202, report);
   });
+
 
   // ---------------------------------------------------------------- 只解析不入队（预览用）
 
@@ -327,6 +343,10 @@ function register(router, ctx) {
     const diag = await urldiag.diagnoseUnsupported(url);
     return json(res, 200, { ...diag, message: urldiag.explain(diag, url) });
   });
+
+  // 暴露给别的路由（「从网站找视频」的批量入队）——**全项目只有这一个入队入口**。
+  // 这样候选入队走的就是和"粘链接"完全相同的那条路：归一化、去重、scheduler.kick()。
+  return { addUrls };
 }
 
 module.exports = { register, ACTIONS };

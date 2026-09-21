@@ -21,6 +21,7 @@ const { AppError } = require('../domain/errors');
 const videoRoutes = require('./routes/videos');
 const libraryRoutes = require('./routes/library');
 const settingsRoutes = require('./routes/settings');
+const discoverRoutes = require('./routes/discover');
 
 /**
  * @param {object} ctx 依赖集合
@@ -58,10 +59,19 @@ function createServer(ctx) {
   scheduler.on('queue', (snap) => broadcast('queue', snap));
   scheduler.on('notice', (n) => broadcast('notice', n));
 
-  // 注册路由。三个文件各自管一片，互不干扰。
+  // 爬取任务的事件 → SSE（与上面完全同构）。
+  // 慢站超过 20 秒时会返回 202，前端靠这个事件看进度。
+  if (ctx.discovery) {
+    ctx.discovery.on('crawl', (e) => broadcast('crawl', e));
+  }
+
+  // 注册路由。每个文件各自管一片，互不干扰。
   libraryRoutes.register(router, ctxWithBroadcast);
   settingsRoutes.register(router, ctxWithBroadcast);
-  videoRoutes.register(router, ctxWithBroadcast);
+  // videos 会把"唯一的入队实现"返回出来，供 discover 复用 ——
+  // 候选入队因此走的是和"粘链接"完全相同的那条路。
+  const { addUrls } = videoRoutes.register(router, ctxWithBroadcast);
+  discoverRoutes.register(router, { ...ctxWithBroadcast, addUrls });
 
   /**
    * 兜底：把内部异常翻译成 HTTP 响应。
@@ -129,6 +139,9 @@ function createServer(ctx) {
   function shutdown({ timeoutMs = 1500 } = {}) {
     scheduler.stop();
     if (ctx.transcode) ctx.transcode.stopAll();
+    // ⚠️ 爬取也要在这里收掉：它持有在飞的 fetch（AbortController）与事件监听器。
+    //    不收的话进程退不出来 —— 这是这个项目反复强调过的一类问题。
+    if (ctx.discovery) ctx.discovery.stop();
     sse.stop();
     return new Promise((resolve) => {
       const done = () => resolve();
