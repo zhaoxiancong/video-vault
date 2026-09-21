@@ -13,12 +13,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$app  = Join-Path $root 'app'
+$root  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$entry = Join-Path $root 'src\main.js'
 
-if (-not (Test-Path (Join-Path $app 'server.js'))) {
-    Write-Host "找不到 app\server.js，请确认脚本和 app 目录在同一层。" -ForegroundColor Red
+if (-not (Test-Path $entry)) {
+    Write-Host "找不到 src\main.js，请确认脚本和 src 目录在同一层。" -ForegroundColor Red
     exit 1
+}
+
+# 引擎（yt-dlp / ffmpeg）约 344MB，没有放进仓库，首次运行要下载一次。
+$ytdlp = Join-Path $root 'tools\bin\ytdlp-win\yt-dlp.exe'
+if (-not (Test-Path $ytdlp)) {
+    Write-Host ""
+    Write-Host "  首次运行：正在准备下载引擎（约 344MB，只需一次）…" -ForegroundColor Yellow
+    & node (Join-Path $root 'tools\bootstrap-engine.js')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  引擎准备失败，请看上面的提示。" -ForegroundColor Red
+        exit 1
+    }
 }
 
 $env:VAULT_PORT = "$Port"
@@ -43,11 +55,7 @@ if (-not $NoBrowser) {
     } -ArgumentList $url | Out-Null
 }
 
-Push-Location $app
-try {
-    # 用绝对路径启动：命令行里带完整项目路径，tools\kill-safe.js 才能识别归属。
-    # 用相对路径时命令行只有 "node server.js"，清理工具无法判断，会保守拒绝。
-    node (Join-Path $app 'server.js')
-} finally {
-    Pop-Location
-}
+# 用绝对路径启动：命令行里带完整项目路径，工作区的 tools\kill-safe.js
+# 才能识别出"这个进程属于本项目"并安全清理。
+# 用相对路径时命令行只有 "node src/main.js"，清理工具无法判断归属，会保守拒绝。
+node $entry

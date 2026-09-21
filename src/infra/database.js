@@ -1,0 +1,604 @@
+'use strict';
+/**
+ * 数据访问层：SQLite 仓储。
+ *
+ * ⚠️ 跟重构前最重要的区别：**不再把裸连接句柄导出给全世界。**
+ *
+ * 以前 `lib/db.js` 导出 `db`（原始 DatabaseSync），于是 server.js、queue.js
+ * 里到处散落着 `db.db.prepare('SELECT ...')`。后果有三个：
+ *
+ *   1. **SQL 泄漏到每一层** —— 改个表结构要全项目 grep
+ *   2. **没有事务边界** —— "读出来 → 算一下 → 写两处"这种序列随时可能被
+ *      并发插入打断，而没有任何一处能声明"这三步是一个整体"
+ *      （dedupeByFile 就是典型：要合并两条记录 + 删掉多余的，中途失败就半拉子）
+ *   3. **测试没法隔离** —— 模块一 require 就打开真实库，测试只能操作用户的真实数据
+ *      （历史上因此误删过 7 条记录）
+ *
+ * 现在：`createDatabase(config, options)` 返回一个仓储对象，SQL 全部关在这一层。
+ * 顺带解决了隔离问题 —— 测试传一个指向临时目录的 config 就行。
+ */
+
+const fsDefault = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+
+const { DEFAULT_SETTINGS } = require('../infra/config');
+const { fromRow, toRow } = require('../domain/video');
+const { STATUS } = require('../infra/config');
+
+/** 建表语句。跟老库完全兼容 —— 一个字符都不改，否则老用户升级就打不开了。 */
+const SCHEMA = `
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS playlists (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  url           TEXT NOT NULL,
+  title         TEXT,
+  uploader      TEXT,
+  site          TEXT,
+  item_count    INTEGER DEFAULT 0,
+  created_at    TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(url)
+);
+
+CREATE TABLE IF NOT EXISTS videos (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  url           TEXT NOT NULL UNIQUE,
+  video_id      TEXT,
+  extractor     TEXT,
+  site          TEXT,
+  title         TEXT,
+  uploader      TEXT,
+  upload_date   TEXT,
+  duration      INTEGER,
+  description   TEXT,
+  thumbnail_url TEXT,
+  thumbnail_path TEXT,
+
+  kind          TEXT NOT NULL DEFAULT 'video',
+  quality       TEXT,
+  container     TEXT,
+  status        TEXT NOT NULL DEFAULT 'queued',
+  progress      REAL DEFAULT 0,
+  speed         REAL DEFAULT 0,
+  eta           INTEGER,
+  error         TEXT,
+  log_path      TEXT,
+
+  file_path     TEXT,
+  file_size     INTEGER,
+  width         INTEGER,
+  height        INTEGER,
+  fps           REAL,
+  vcodec        TEXT,
+  acodec        TEXT,
+
+  transcoded_path TEXT,
+  transcode_status TEXT,
+  transcode_preset TEXT,
+
+  subscription_id INTEGER,
+
+  playlist_id   INTEGER REFERENCES playlists(id) ON DELETE SET NULL,
+  playlist_index INTEGER,
+  notes         TEXT,
+  starred       INTEGER DEFAULT 0,
+
+  thumb_embed_ok INTEGER,
+  thumb_format   TEXT,
+
+  created_at    TEXT DEFAULT (datetime('now','localtime')),
+  updated_at    TEXT DEFAULT (datetime('now','localtime')),
+  finished_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_videos_status   ON videos(status);
+CREATE INDEX IF NOT EXISTS idx_videos_uploader ON videos(uploader);
+CREATE INDEX IF NOT EXISTS idx_videos_site     ON videos(site);
+CREATE INDEX IF NOT EXISTS idx_videos_created  ON videos(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  type       TEXT NOT NULL,
+  payload    TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  url         TEXT NOT NULL UNIQUE,
+  label       TEXT,
+  site        TEXT,
+  enabled     INTEGER DEFAULT 1,
+  quality     TEXT DEFAULT 'best',
+  kind        TEXT DEFAULT 'video',
+  last_check  TEXT,
+  last_seen   TEXT,
+  check_interval_min INTEGER DEFAULT 60,
+  created_at  TEXT DEFAULT (datetime('now','localtime'))
+);
+`;
+
+/** 路径自愈时认作"本项目自己的"子目录（只有这两个，避免误伤用户的外部目录） */
+const OWN_SUBDIRS = ['downloads', 'data'];
+
+/**
+ * @param {object} config loadConfig() 的产物
+ * @param {object} [options]
+ * @param {object} [options.fs]      注入 fs（测试用）
+ * @param {boolean} [options.strict] 白名单外的字段直接抛错（开发期 VAULT_STRICT_DB=1）
+ * @returns {object} 仓储
+ */
+function createDatabase(config, options = {}) {
+  const fs = options.fs || fsDefault;
+  const strict = options.strict ?? Boolean(process.env.VAULT_STRICT_DB);
+
+  fs.mkdirSync(path.dirname(config.paths.db), { recursive: true });
+  const db = new DatabaseSync(config.paths.db);
+  db.exec(SCHEMA);
+
+  // ---------------------------------------------------------------- 事务
+
+  /**
+   * 把一组写操作包成一个事务。
+   *
+   * 为什么必须显式提供：SQLite 的每条语句自带隐式事务，但"读-改-写"这种
+   * 跨语句的序列不在同一个事务里。dedupeByFile 要合并两条记录再删掉多余的，
+   * 中途抛异常就会留下"合并了一半"的状态 —— 而磁盘文件只有一份，
+   * 库和磁盘就对不上了。
+   *
+   * 用 BEGIN IMMEDIATE 而不是 BEGIN：立刻拿写锁，避免升级锁时才发现冲突。
+   */
+  function transaction(fn) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = fn();
+      db.exec('COMMIT');
+      return result;
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch { /* 回滚失败就只能往上抛原错误 */ }
+      throw e;
+    }
+  }
+
+  // ---------------------------------------------------------------- 设置
+
+  function getSettings() {
+    const rows = db.prepare('SELECT key, value FROM settings').all();
+    const out = { ...DEFAULT_SETTINGS };
+    for (const r of rows) {
+      try { out[r.key] = JSON.parse(r.value); } catch { out[r.key] = r.value; }
+    }
+    return out;
+  }
+
+  function setSettings(patch) {
+    const stmt = db.prepare(
+      'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+    );
+    transaction(() => {
+      for (const [k, v] of Object.entries(patch || {})) {
+        // 只接受已知设置键：防止前端塞进来任意键把设置表撑成一锅粥
+        if (!(k in DEFAULT_SETTINGS)) continue;
+        stmt.run(k, JSON.stringify(v));
+      }
+    });
+    return getSettings();
+  }
+
+  // ---------------------------------------------------------------- 迁移
+
+  /**
+   * 给已存在的表补列。
+   *
+   * ⚠️ SQLite 的 `CREATE TABLE IF NOT EXISTS` **不会**给已存在的表加新列，
+   *    所以每次给 videos 加字段，都必须在这里补一条 ALTER TABLE，
+   *    否则老用户的数据库会缺列、查询直接报 "no such column"。
+   */
+  function ensureColumns() {
+    const added = [];
+    const cols = db.prepare('PRAGMA table_info(videos)').all().map((r) => r.name);
+    const needed = [
+      ['thumb_embed_ok', 'INTEGER'],
+      ['thumb_format', 'TEXT'],
+    ];
+    for (const [name, type] of needed) {
+      if (!cols.includes(name)) {
+        db.exec(`ALTER TABLE videos ADD COLUMN ${name} ${type}`);
+        added.push(name);
+      }
+    }
+    return added;
+  }
+
+  /**
+   * 路径自愈：让整个工具目录可以**被移动到任何地方**而不丢数据。
+   *
+   * 背景：数据库里存的是绝对路径。一旦把项目文件夹挪走，服务本身还能起来
+   * （路径都从 __dirname 推导），但库里每条记录都指向旧位置 —— 封面空白、
+   * 播放 404、转码找不到源文件。
+   *
+   * 做法：把"旧根目录 + 相对片段"重写成"当前根目录 + 同一相对片段"。
+   * 只有满足下面**全部**条件才改写，避免误伤用户自定义的外部目录：
+   *   1. 存的是绝对路径
+   *   2. 用当前根目录拼不出来、但旧路径里能识别出一个已知子目录
+   *   3. 该子目录在当前根下确实存在
+   */
+  function healPaths() {
+    const fixed = {
+      file_path: 0, thumbnail_path: 0, log_path: 0, transcoded_path: 0, downloadDir: false,
+    };
+    const rootLower = config.root.toLowerCase();
+
+    const rewrite = (p) => {
+      if (!p || typeof p !== 'string') return null;
+      if (!path.isAbsolute(p)) return null;
+      const norm = path.normalize(p);
+      // 已经在当前根目录下 → 无需处理
+      if (norm.toLowerCase().startsWith(rootLower + path.sep)) return null;
+
+      for (const sub of OWN_SUBDIRS) {
+        const marker = path.sep + sub + path.sep;
+        const idx = norm.toLowerCase().indexOf(marker.toLowerCase());
+        if (idx === -1) continue;
+        const rel = norm.slice(idx + 1);
+        const subAbs = path.join(config.root, sub);
+        if (!fs.existsSync(subAbs)) continue;   // 当前根下没有该子目录，不动
+        return path.join(config.root, rel);
+      }
+      return null;
+    };
+
+    const rows = db.prepare(
+      'SELECT id, file_path, thumbnail_path, log_path, transcoded_path FROM videos',
+    ).all();
+    const up = db.prepare(
+      'UPDATE videos SET file_path=?, thumbnail_path=?, log_path=?, transcoded_path=? WHERE id=?',
+    );
+    transaction(() => {
+      for (const r of rows) {
+        const nf = rewrite(r.file_path);
+        const nt = rewrite(r.thumbnail_path);
+        const nl = rewrite(r.log_path);
+        const nc = rewrite(r.transcoded_path);
+        if (!nf && !nt && !nl && !nc) continue;
+        if (nf) fixed.file_path += 1;
+        if (nt) fixed.thumbnail_path += 1;
+        if (nl) fixed.log_path += 1;
+        if (nc) fixed.transcoded_path += 1;
+        up.run(nf || r.file_path, nt || r.thumbnail_path, nl || r.log_path,
+          nc || r.transcoded_path, r.id);
+      }
+
+      const row = db.prepare("SELECT value FROM settings WHERE key='downloadDir'").get();
+      if (row) {
+        let cur = null;
+        try { cur = JSON.parse(row.value); } catch { cur = row.value; }
+        const next = rewrite(cur);
+        if (next) {
+          db.prepare("UPDATE settings SET value=? WHERE key='downloadDir'").run(JSON.stringify(next));
+          fixed.downloadDir = { from: cur, to: next };
+        }
+      }
+    });
+
+    return fixed;
+  }
+
+  /**
+   * 一次性迁移。
+   *
+   * 背景：早期版本默认限速 5MB/s，下大文件时它成了唯一瓶颈（实测被完整吃满）。
+   * 默认值已改成不限速，但**已存在的数据库里仍存着旧的 5**，改默认值对老库无效，
+   * 所以这里做一次显式迁移。只跑一次，之后用户自己改的值不会再被覆盖。
+   */
+  function runMigrations() {
+    const result = { columnsAdded: ensureColumns(), rateLimitMB: null, pathsHealed: null };
+
+    // 路径自愈每次都跑：它自带"已经在正确位置就跳过"的判断，开销只有一次全表扫描，
+    // 换来的是"整个文件夹随便挪"的能力。
+    const healed = healPaths();
+    if (healed && (healed.file_path || healed.thumbnail_path || healed.log_path
+        || healed.transcoded_path || healed.downloadDir)) {
+      result.pathsHealed = healed;
+    }
+
+    const done = db.prepare("SELECT value FROM settings WHERE key='_migrated_unlimited_rate'").get();
+    if (!done) {
+      const cur = db.prepare("SELECT value FROM settings WHERE key='rateLimitMB'").get();
+      let was = null;
+      try { was = cur ? JSON.parse(cur.value) : null; } catch { was = null; }
+      transaction(() => {
+        if (was === 5) db.prepare("UPDATE settings SET value='0' WHERE key='rateLimitMB'").run();
+        db.prepare("INSERT INTO settings(key,value) VALUES('_migrated_unlimited_rate','1')").run();
+      });
+      result.rateLimitMB = { from: was, to: was === 5 ? 0 : was };
+    }
+
+    return result;
+  }
+
+  // ---------------------------------------------------------------- videos
+
+  function getVideo(id) {
+    return fromRow(db.prepare('SELECT * FROM videos WHERE id = ?').get(id) || null);
+  }
+
+  function findByUrl(url) {
+    return fromRow(db.prepare('SELECT * FROM videos WHERE url = ?').get(url) || null);
+  }
+
+  function insertVideo(data) {
+    const { cols, values, dropped } = toRow(data, { strict });
+    if (!cols.length) {
+      const { ValidationError } = require('../domain/errors');
+      throw new ValidationError('insertVideo: 没有可写入的字段', {
+        hint: dropped.length ? `这些字段不在白名单里：${dropped.join(', ')}` : '',
+      });
+    }
+    const sql = `INSERT INTO videos (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`;
+    const info = db.prepare(sql).run(...values);
+    return getVideo(Number(info.lastInsertRowid));
+  }
+
+  function updateVideo(id, patch) {
+    const { cols, values } = toRow(patch, { strict });
+    if (!cols.length) return getVideo(id);
+    const sql = `UPDATE videos SET ${cols.map((c) => `${c}=?`).join(',')},
+                 updated_at=datetime('now','localtime') WHERE id=?`;
+    db.prepare(sql).run(...values, id);
+    return getVideo(id);
+  }
+
+  /** 库查询：关键词 + 状态 + 站点 + 作者 + 排序 */
+  function listVideos({
+    q = '', status = '', site = '', uploader = '', starred = false,
+    sort = 'created_desc', limit = 200, offset = 0,
+  } = {}) {
+    const where = [];
+    const args = [];
+    if (q) {
+      where.push('(title LIKE ? OR uploader LIKE ? OR description LIKE ? OR url LIKE ?)');
+      const like = `%${q}%`;
+      args.push(like, like, like, like);
+    }
+    if (status) { where.push('status = ?'); args.push(status); }
+    if (site) { where.push('site = ?'); args.push(site); }
+    if (uploader) { where.push('uploader = ?'); args.push(uploader); }
+    if (starred) where.push('starred = 1');
+
+    const sorts = {
+      created_desc: 'created_at DESC',
+      created_asc: 'created_at ASC',
+      title_asc: 'title COLLATE NOCASE ASC',
+      size_desc: 'file_size DESC',
+      duration_desc: 'duration DESC',
+    };
+    const orderBy = sorts[sort] || sorts.created_desc;
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const rows = db.prepare(
+      `SELECT * FROM videos ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
+    ).all(...args, limit, offset);
+    const total = db.prepare(`SELECT COUNT(*) AS n FROM videos ${whereSql}`).get(...args).n;
+    return { rows: rows.map(fromRow), total };
+  }
+
+  function facets() {
+    return {
+      sites: db.prepare(
+        "SELECT site AS v, COUNT(*) AS n FROM videos WHERE site IS NOT NULL AND site<>'' GROUP BY site ORDER BY n DESC",
+      ).all(),
+      uploaders: db.prepare(
+        "SELECT uploader AS v, COUNT(*) AS n FROM videos WHERE uploader IS NOT NULL AND uploader<>'' GROUP BY uploader ORDER BY n DESC LIMIT 100",
+      ).all(),
+      statuses: db.prepare('SELECT status AS v, COUNT(*) AS n FROM videos GROUP BY status').all(),
+      totals: db.prepare(
+        `SELECT COUNT(*) AS count_all,
+                COALESCE(SUM(file_size),0) AS bytes_all,
+                COALESCE(SUM(CASE WHEN status='done' THEN 1 ELSE 0 END),0) AS count_done
+         FROM videos`,
+      ).get(),
+    };
+  }
+
+  /**
+   * 删除记录。
+   * ⚠️ 默认**只删记录、不动文件** —— 这条是刻意的：下载好的视频来之不易，
+   *    一个误点就永久删掉是不可接受的。要删文件必须显式 keepFile=false 且上层二次确认。
+   */
+  function deleteVideo(id, { keepFile = true } = {}) {
+    const v = getVideo(id);
+    if (!v) return null;
+    db.prepare('DELETE FROM videos WHERE id = ?').run(id);
+    return { video: v, keepFile };
+  }
+
+  function countByStatus(status) {
+    return db.prepare('SELECT COUNT(*) AS n FROM videos WHERE status = ?').get(status).n;
+  }
+
+  function countActive() {
+    return db.prepare(
+      `SELECT COUNT(*) AS n FROM videos WHERE status IN (?,?,?,?)`,
+    ).get(STATUS.QUEUED, STATUS.PARSING, STATUS.DOWNLOADING, STATUS.PROCESSING).n;
+  }
+
+  /** 按状态取一批（调度器用） */
+  function listByStatus(status, limit = 1) {
+    const rows = db.prepare(
+      'SELECT * FROM videos WHERE status = ? ORDER BY id ASC LIMIT ?',
+    ).all(status, limit);
+    return rows.map(fromRow);
+  }
+
+  function listByStatuses(statuses) {
+    const ph = statuses.map(() => '?').join(',');
+    return db.prepare(`SELECT * FROM videos WHERE status IN (${ph})`).all(...statuses).map(fromRow);
+  }
+
+  /** 启动时把"上次没跑完"的任务标成 paused，实现「手动点继续才续」 */
+  function markStaleActiveAsPaused() {
+    const stale = db.prepare(
+      `SELECT id FROM videos WHERE status IN (?,?,?,?)`,
+    ).all(STATUS.QUEUED, STATUS.PARSING, STATUS.DOWNLOADING, STATUS.PROCESSING);
+    if (stale.length) {
+      db.prepare(
+        `UPDATE videos SET status=?, error='上次会话中断，等待手动继续',
+           updated_at=datetime('now','localtime')
+         WHERE status IN (?,?,?,?)`,
+      ).run(STATUS.PAUSED, STATUS.QUEUED, STATUS.PARSING, STATUS.DOWNLOADING, STATUS.PROCESSING);
+    }
+    return stale.map((s) => s.id);
+  }
+
+  /** 全库扫描一次重复（同 file_path 有多条），供启动时清理 */
+  function findDuplicateFiles() {
+    return db.prepare(
+      `SELECT file_path, COUNT(*) AS n, GROUP_CONCAT(id) AS ids
+       FROM videos WHERE file_path IS NOT NULL AND file_path != ''
+       GROUP BY file_path HAVING n > 1`,
+    ).all();
+  }
+
+  /**
+   * 合并"指向同一个文件"的重复记录。
+   *
+   * 为什么需要：如果库出过问题、用 rebuild-library 从磁盘重建过，
+   * 重建的记录用的是 `local://` 占位 URL。用户之后把**原始链接**再粘一次
+   * 补元数据时，因为 URL 不同，会被当成新任务 → 同一个文件出现两条记录
+   * （一条有真实 URL、一条有完整封面/备注）。
+   *
+   * 做法：优先保留**信息更全**的那条，把另一条缺的字段补过去。
+   * 判断"更全"的顺序：有真实 URL > 有封面 > 有备注 > id 更小（先来的）。
+   *
+   * 整个合并放进一个事务 —— 中途失败绝不能留下"合并了一半"的状态。
+   */
+  function dedupeByFile(newId) {
+    return transaction(() => {
+      const nv = getVideo(newId);
+      if (!nv || !nv.file_path) return null;
+
+      const twins = db.prepare('SELECT * FROM videos WHERE file_path = ? AND id != ?')
+        .all(nv.file_path, newId).map(fromRow);
+      if (!twins.length) return null;
+
+      const score = (v) => (
+        (v.url && !String(v.url).startsWith('local://') ? 8 : 0)
+        + (v.thumbnail_path ? 4 : 0)
+        + (v.notes ? 2 : 0)
+        + (v.description ? 1 : 0)
+      );
+
+      let keep = nv;
+      for (const t of twins) if (score(t) > score(keep)) keep = t;
+
+      // 把各条里"有值而 keep 没有"的字段汇总过去，尽量不丢信息
+      const patch = {};
+      for (const src of [nv, ...twins]) {
+        if (src.id === keep.id) continue;
+        for (const col of ['thumbnail_path', 'notes', 'description', 'upload_date',
+          'duration', 'width', 'height', 'fps', 'vcodec', 'acodec',
+          'transcoded_path', 'transcode_status', 'transcode_preset',
+          'thumb_embed_ok', 'thumb_format', 'playlist_id', 'playlist_index', 'video_id',
+          'extractor', 'uploader', 'site', 'title', 'file_size', 'container']) {
+          if ((keep[col] === null || keep[col] === undefined || keep[col] === '')
+            && src[col] !== null && src[col] !== undefined && src[col] !== '') {
+            patch[col] = src[col];
+            keep = { ...keep, [col]: src[col] };
+          }
+        }
+      }
+      if (Object.keys(patch).length) {
+        const { cols, values } = toRow(patch, { strict });
+        if (cols.length) {
+          db.prepare(`UPDATE videos SET ${cols.map((c) => `${c}=?`).join(',')} WHERE id=?`)
+            .run(...values, keep.id);
+        }
+      }
+
+      // 删掉其余的（磁盘文件只留一份，绝不能删）
+      let removed = 0;
+      for (const t of twins) {
+        if (t.id === keep.id) continue;
+        db.prepare('DELETE FROM videos WHERE id = ?').run(t.id);
+        removed += 1;
+      }
+      if (nv.id !== keep.id) {
+        db.prepare('DELETE FROM videos WHERE id = ?').run(nv.id);
+        removed += 1;
+      }
+      return { kept: keep.id, removed, file: nv.file_path };
+    });
+  }
+
+  // ---------------------------------------------------------------- playlists
+
+  function upsertPlaylist({ url, title, uploader, site, item_count }) {
+    db.prepare(
+      `INSERT INTO playlists(url,title,uploader,site,item_count) VALUES(?,?,?,?,?)
+       ON CONFLICT(url) DO UPDATE SET title=excluded.title, uploader=excluded.uploader,
+         site=excluded.site, item_count=excluded.item_count`,
+    ).run(url, title || null, uploader || null, site || null, item_count || 0);
+    return db.prepare('SELECT * FROM playlists WHERE url = ?').get(url);
+  }
+
+  function getPlaylistItems(playlistId) {
+    return db.prepare(
+      'SELECT * FROM videos WHERE playlist_id = ? ORDER BY playlist_index ASC, id ASC',
+    ).all(playlistId).map(fromRow);
+  }
+
+  // ---------------------------------------------------------------- events（SSE 游标）
+
+  function emitEvent(type, payload) {
+    const info = db.prepare('INSERT INTO events(type,payload) VALUES(?,?)')
+      .run(type, payload ? JSON.stringify(payload) : null);
+    return Number(info.lastInsertRowid);
+  }
+
+  function eventsSince(id) {
+    return db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT 200').all(id)
+      .map((e) => ({ ...e, payload: e.payload ? JSON.parse(e.payload) : null }));
+  }
+
+  /** 老的 events 会一直堆积，启动时清一次 */
+  function pruneEvents(keep = 5000) {
+    db.prepare(
+      `DELETE FROM events WHERE id <= (SELECT MAX(id) - ? FROM events)`,
+    ).run(keep);
+  }
+
+  // ---------------------------------------------------------------- 生命周期
+
+  function close() {
+    try { db.close(); } catch { /* 已经关了 */ }
+  }
+
+  return {
+    // 设置
+    getSettings, setSettings,
+    // 迁移
+    runMigrations, healPaths, ensureColumns,
+    // videos
+    getVideo, findByUrl, insertVideo, updateVideo, listVideos, facets,
+    deleteVideo, countByStatus, countActive, listByStatus, listByStatuses,
+    markStaleActiveAsPaused, findDuplicateFiles, dedupeByFile,
+    // playlists
+    upsertPlaylist, getPlaylistItems,
+    // events
+    emitEvent, eventsSince, pruneEvents,
+    // 事务与生命周期
+    transaction, close,
+    /** 仅供测试与迁移脚本使用。业务代码不要碰它。 */
+    raw: db,
+  };
+}
+
+module.exports = { createDatabase, SCHEMA, OWN_SUBDIRS };

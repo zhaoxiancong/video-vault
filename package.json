@@ -1,0 +1,31 @@
+{
+  "name": "video-vault",
+  "version": "2.0.0",
+  "description": "本地网页版视频下载工具：yt-dlp 引擎 + SQLite 视频库 + 实时进度界面。粘链接进去，它负责下载、归类、入库；下完能搜索、筛选、网页内播放，还能一键转成剪辑软件好用的格式。",
+  "type": "commonjs",
+  "main": "src/main.js",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "setup": "node tools/bootstrap-engine.js",
+    "test": "node test/run.js",
+    "test:unit": "node test/run.js unit",
+    "test:integration": "node test/run.js integration",
+    "test:ui": "node test/ui/smoke.js",
+    "check": "node tools/lint-undefined.js && node tools/check-frontend.js",
+    "rebuild": "node tools/rebuild-library.js"
+  },
+  "keywords": [
+    "yt-dlp",
+    "video-downloader",
+    "video-library",
+    "sqlite",
+    "self-hosted"
+  ],
+  "dependencies": {},
+  "devDependencies": {}
+}
