@@ -55,6 +55,10 @@ desktop.ini
 # 不是项目文档的一部分；而且里面会提到本机的目录结构。
 # 保留在本地磁盘上供交接用，但不进公开仓库。
 PROGRESS.md
+# 断点的历史明细（从 PROGRESS.md 归档出去的那部分）。同理，而且它更大 ——
+# 里面逐轮记着当时的调试过程与本机路径。PROGRESS.md 被忽略而它没有，
+# 推上去就等于把 PROGRESS.md 绕过去了。
+PROGRESS-history.md
 
 # 交接工具（D:\AI\tools\dev.js / handoff.js）的产物目录：服务日志、每次验证的
 # 完整输出、断点体检报告。纯开发过程记录，跟 PROGRESS.md 同理，不进公开仓库。
