@@ -19,16 +19,55 @@ const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 
+/**
+ * 跑一条 git 命令，用 **fd 重定向**把输出拿回来。
+ * 受限沙箱里 `spawnSync(..., {encoding})` 默认走管道，会直接 EPERM。
+ */
+function gitText(args) {
+  const out = path.join(os.tmpdir(), `vv-git-${process.pid}-${Math.random().toString(36).slice(2)}.log`);
+  const fd = fs.openSync(out, 'w');
+  try {
+    const r = spawnSync('git', ['-C', ROOT, ...args], {
+      stdio: ['ignore', fd, fd], timeout: 60000, windowsHide: true,
+    });
+    if (r.error) throw new Error(`git ${args[0]} 起不来：${r.error.message}`);
+    fs.closeSync(fd);
+    return fs.readFileSync(out, 'utf8');
+  } finally {
+    try { fs.closeSync(fd); } catch { /* 已经关过了 */ }
+    try { fs.unlinkSync(out); } catch { /* 忽略 */ }
+  }
+}
+
+/**
+ * 找到「重构前的基线快照」那个提交。
+ *
+ * ⚠️ 这里**刻意不写死 SHA**。原先写的是 `0804305`，吃过一次亏：
+ *    那个 SHA 只在当时那次历史里成立，一旦重写历史（例如从历史里清掉
+ *    不该提交的文件）它就失效 —— 而失效的表现是 `git show` 返回空字符串，
+ *    脚本于是报告"老套件 0 项"，看起来像"新套件全覆盖"，**是一条假绿**。
+ *    改成按提交标题找，并且找不到就**报错退出**，不静默降级。
+ */
+let baselineSha = null;
+function findBaseline() {
+  if (baselineSha) return baselineSha;
+  const hit = gitText(['log', '--all', '--format=%H\t%s'])
+    .split('\n')
+    .find((l) => /基线快照/.test(l));
+  if (!hit) {
+    throw new Error('git 历史里找不到「重构前的基线快照」提交 —— 取不回老套件就没法对照，宁可报错也不给假绿');
+  }
+  baselineSha = hit.split('\t')[0];
+  return baselineSha;
+}
+
 /** 老套件从 git 历史里取（它们随 app/ 一起删掉了） */
 function oldSuite(name) {
-  const out = path.join(os.tmpdir(), `old-${name}-${Date.now()}.js`);
-  const fd = fs.openSync(out, 'w');
-  spawnSync('git', ['-C', ROOT, 'show', `0804305:app/${name}`], {
-    stdio: ['ignore', fd, fd], timeout: 60000, windowsHide: true,
-  });
-  fs.closeSync(fd);
-  const text = fs.readFileSync(out, 'utf8');
-  fs.unlinkSync(out);
+  const sha = findBaseline();
+  const text = gitText(['show', `${sha}:app/${name}`]);
+  if (!text.trim()) {
+    throw new Error(`取回的 app/${name} 是空的（基线提交 ${sha.slice(0, 8)} 里没有这个文件）`);
+  }
   return text;
 }
 
