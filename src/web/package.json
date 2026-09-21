@@ -1,0 +1,6 @@
+{
+  "//": "这个目录是**浏览器端**的 ES 模块，不是 Node 的 CommonJS。",
+  "//why": "根 package.json 是 type:commonjs（后端用的是 require）。前端没有构建步骤、直接跑原生 ES 模块，所以要在这里单独声明一次，Node 的测试才能 import 它们。",
+  "//browser": "浏览器不看这个文件 —— 它认的是 index.html 里 <script type=\"module\">，MIME 由服务端给成 text/javascript。",
+  "type": "module"
+}

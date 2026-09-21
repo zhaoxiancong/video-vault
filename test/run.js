@@ -61,15 +61,16 @@ const C = process.stdout.isTTY
   ? { r: '\x1b[31m', g: '\x1b[32m', y: '\x1b[33m', d: '\x1b[90m', B: '\x1b[1m', x: '\x1b[0m' }
   : { r: '', g: '', y: '', d: '', B: '', x: '' };
 
-/** 收集测试文件，跳过辅助文件（run.js 自己、fixtures 之类） */
+/** 收集测试文件，跳过辅助文件（run.js 自己、helpers/、ui/ 要真浏览器） */
 function collect(dir, out = []) {
   if (!fs.existsSync(dir)) return out;
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (e.name === 'ui' || e.name === 'fixtures') continue;
+      // ui/ 要真实 Chrome（受限沙箱里起不来），helpers/ 是共享垫片不是测试
+      if (e.name === 'ui' || e.name === 'helpers' || e.name === 'fixtures') continue;
       collect(full, out);
-    } else if (e.name.endsWith('.test.js')) {
+    } else if (e.name.endsWith('.test.js') || e.name.endsWith('.test.mjs')) {
       out.push(full);
     }
   }

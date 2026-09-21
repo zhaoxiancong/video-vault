@@ -172,7 +172,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 20260920_视频下载工具/
 ├── 启动.cmd / 启动.ps1      ← 双击这个
 ├── src/                     ← 程序本体
-├── test/                    ← 测试（133 项）
+├── test/                    ← 测试（146 项）
 ├── tools/                   ← 辅助脚本（引擎安装、重建库、静态检查）
 ├── downloads/               ← 视频都在这（可在设置里改）
 │   └── _converted/          ← 转码产物
@@ -199,7 +199,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 ## 5. 测试与静态检查
 
 ```powershell
-npm test                    # 全部 133 项
+npm test                    # 全部 146 项
 node test/run.js unit       # 只跑单元测试
 node test/run.js integration # 只跑集成测试
 node test/run.js --verbose  # 带完整输出
@@ -217,11 +217,12 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 | 单元 | `test/unit/errors.test.js` | 8 | 无 |
 | 单元 | `test/unit/progress.test.js` | 21 | 无 |
 | 单元 | `test/unit/downloader.test.js` | 24 | 无（只拼参数，不起进程） |
-| 单元 | `test/unit/media.test.js` | 14 | 无（ffprobe 用于真实文件判定） |
+| 单元 | `test/unit/media.test.js` | 14 | ffprobe 用于真实文件判定 |
 | 集成 | `test/integration/database.test.js` | 15 | 临时目录里的独立数据库 |
 | 集成 | `test/integration/api.test.js` | 23 | 临时目录里的独立实例，走真实 HTTP |
 | 集成 | `test/integration/path-healing.test.js` | 7 | 两个临时目录，模拟项目被搬走 |
 | 集成 | `test/integration/media-and-transcode.test.js` | 10 | 用 ffmpeg 现场生成真视频 |
+| 集成 | `test/integration/frontend-dom.test.mjs` | 13 | **DOM 垫片**，不需要浏览器 |
 | 端到端 | `test/e2e/download.test.js` | 2 | **联网**，真的下载一个视频 |
 
 **所有测试都在临时目录里跑**，不碰你的真实库。这是重构带来的直接好处。
@@ -229,6 +230,25 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 > `test/e2e/download.test.js` 断言的是完整闭环：下载 → 合并 → ffprobe 入库 →
 > 网页播放 Range → 库查询去重 → 中间分片被清理。它默认**会跑**（约 12 秒）；
 > 不想走流量就设 `VAULT_SKIP_E2E=1`。
+
+### 前端怎么在没浏览器的情况下测
+
+`test/helpers/dom-shim.mjs` 是一个**刻意保持最小**的 DOM 垫片：
+元素树、`querySelector`（含后代组合）、事件冒泡与委托、`classList`、`style`、
+`dataset`、`localStorage`，外加假的 `fetch` / `EventSource`。
+`test/integration/frontend-dom.test.mjs` 用它把前端**真的 import 进来、真的点几下**。
+
+它挡得住这三类问题（静态检查挡不住，而真实浏览器在受限环境里起不来）：
+
+1. 模块级代码在 import 时抛异常（某个 `#id` 找不到）
+2. 事件处理器一跑就崩
+3. 渲染出来的节点结构不对、或误用了 `innerHTML`
+
+它**替代不了**真实浏览器：没有布局、没有 CSS 级联、没有渲染、没有 `elementFromPoint`。
+那些仍然要靠 `test/ui/smoke.js`（需要放宽权限的会话）。
+
+> 垫片自己踩过的坑都写在注释里了，改它之前值得读一遍 ——
+> 最费时间的一类问题是"垫片不够真导致的假失败"：测试红了，被测代码其实是对的。
 
 ### 没有浏览器时怎么办
 
@@ -484,7 +504,7 @@ ffprobe 即使加了 `-v error`，也可能在 JSON **前面**吐一行警告
 
 ```powershell
 npm start                          # 启动服务
-npm test                           # 全部测试（133 项）
+npm test                           # 全部测试（146 项）
 npm run check                      # 静态检查
 npm run setup                      # 只下载引擎
 
