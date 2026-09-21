@@ -315,6 +315,31 @@ test('渲染出来的内容不含未转义尖括号（前端全部走 textConten
 });
 
 /**
+ * index.html 声明的图标文件必须真的存在。
+ *
+ * 为什么单独钉一条：图标缺失的表现**不是**页面坏掉，而是浏览器悄悄去要
+ * `/favicon.ico` 拿到 404、控制台多一条 error —— 只有 `test/ui/smoke.js`
+ * 会因此失败，而它要真实 Chrome，受限会话里跑不起来。所以这个坑能在
+ * 代码里躺很久（实测躺了至少一个提交）。这条纯静态检查不需要浏览器。
+ *
+ * 路由映射：`/static/*` → `src/web/*`（见 src/http/server.js 与 infra/config.js）。
+ */
+test('index.html 声明的图标文件真实存在（缺失会让浏览器回退到 404 的 /favicon.ico）', () => {
+  const declared = [...HTML.matchAll(/<link\b[^>]*>/g)]
+    .filter((m) => /rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/.test(m[0]))
+    .map((m) => (m[0].match(/href=["']([^"']+)["']/) || [])[1])
+    .filter((href) => href && href.startsWith('/static/'));
+
+  assert.ok(declared.length > 0,
+    'index.html 没有声明任何图标 —— 浏览器会自己去要 /favicon.ico 并拿到 404');
+
+  const missing = declared.filter((href) => !fs.existsSync(
+    path.join(WEB, ...href.slice('/static/'.length).split('?')[0].split('/')),
+  ));
+  assert.deepEqual(missing, [], `声明了但磁盘上没有：${missing.join(', ')}`);
+});
+
+/**
  * 上面这些用例能跑的前提是"垫片提供的浏览器 API 跟前端用到的一致"。
  * 哪天前端开始用一个垫片没实现的 API（比如 matchMedia、IntersectionObserver），
  * 表现会是**一堆看起来莫名其妙的失败**。这两个用例把那个前提显式钉住，

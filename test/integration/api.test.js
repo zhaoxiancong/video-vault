@@ -65,6 +65,35 @@ test('健康检查返回引擎状态与设置', async () => {
   } finally { await s.cleanup(); }
 });
 
+/**
+ * 图标必须真的服务得出来。
+ *
+ * 这条测试是从一个真实的坑补回来的：之前 index.html **没声明图标**，仓库里也没有
+ * 图标文件，于是浏览器自动去要 `/favicon.ico` 拿到 404 —— 控制台多一条 error，
+ * 而 `test/ui/smoke.js` 的「没有运行时报错」把任何 console error 都算失败，
+ * 结果那条 UI 冒烟测试**在任何机器上都必然报 1 项失败**（生来就红）。
+ * 而浏览器不是每个会话都起得来，所以这个坑当时没被发现。
+ *
+ * 这里走真实 HTTP 验"服务端确实吐得出这个文件"，纯静态的部分（HTML 里声明的
+ * 文件存不存在）在 test/integration/frontend-dom.test.mjs 里。
+ */
+test('图标：/static/favicon.svg 真的服务得出来，且浏览器不会再去要 /favicon.ico', async () => {
+  const s = await startApp();
+  try {
+    const res = await fetch(`${s.base}/static/favicon.svg`);
+    assert.equal(res.status, 200, '图标必须 200 —— 404 会让浏览器回退去要 /favicon.ico');
+    assert.match(res.headers.get('content-type') || '', /image\/svg\+xml/,
+      'MIME 不对浏览器可能不认这个图标');
+    const body = await res.text();
+    assert.ok(body.includes('<svg'), '内容应该是 SVG');
+
+    const fallback = await s.call('GET', '/favicon.ico');
+    assert.equal(fallback.status, 404,
+      '本项目的静态服务没有映射 /favicon.ico —— 所以 index.html 里必须显式声明图标，'
+      + '否则浏览器那次自动请求就是一条 404 console error');
+  } finally { await s.cleanup(); }
+});
+
 test('设置：未知键返回 400 而不是静默忽略', async () => {
   const s = await startApp();
   try {

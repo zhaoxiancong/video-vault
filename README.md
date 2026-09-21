@@ -171,7 +171,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 20260920_视频下载工具/
 ├── 启动.cmd / 启动.ps1      ← 双击这个
 ├── src/                     ← 程序本体
-├── test/                    ← 测试（147 项）
+├── test/                    ← 测试（150 项）
 ├── tools/                   ← 辅助脚本（引擎安装、重建库、静态检查）
 ├── downloads/               ← 视频都在这（可在设置里改）
 │   └── _converted/          ← 转码产物
@@ -198,7 +198,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 ## 5. 测试与静态检查
 
 ```powershell
-npm test                    # 全部 147 项
+npm test                    # 全部 150 项
 node test/run.js unit       # 只跑单元测试
 node test/run.js integration # 只跑集成测试
 node test/run.js --verbose  # 带完整输出
@@ -565,7 +565,7 @@ test('转码绝不动原始文件', { skip: noFFmpeg }, async (t) => { ... });
 
 ```powershell
 npm start                          # 启动服务
-npm test                           # 全部测试（147 项）
+npm test                           # 全部测试（150 项）
 npm run check                      # 静态检查
 npm run setup                      # 只下载引擎
 

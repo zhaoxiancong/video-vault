@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>视频下载工具 · Video Vault</title>
+<!-- 图标必须显式声明：不声明的话浏览器会去要 /favicon.ico 拿到 404，
+     在控制台留一条 error，test/ui/smoke.js 的「没有运行时报错」就会挂。
+     路由：/static/* → src/web/*（见 src/http/server.js 与 infra/config.js 的 frontend）。 -->
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>

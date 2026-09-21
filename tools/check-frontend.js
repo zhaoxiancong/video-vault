@@ -144,6 +144,33 @@ if (!/<script\s+type="module"[^>]*src="\/static\/app\.js"/.test(html)) {
   ok.push('index.html 用 type="module" 加载入口');
 }
 
+// ---------------------------------------------------------------- 6
+
+/**
+ * index.html 里引的资源必须真的存在。
+ *
+ * 这个检查是因为一个真实的坑：图标没声明时，浏览器会自己去要 `/favicon.ico`
+ * 拿到 404，控制台留一条 error —— 而 `test/ui/smoke.js` 的「没有运行时报错」
+ * 把任何 console error 都算失败，于是那条 UI 冒烟测试**在任何机器上必然报 1 项失败**。
+ * 它只在有权限跑 Chrome 的会话里才暴露；而浏览器不是随时能起的。
+ *
+ * 所以这里把"声明的资源存不存在"变成一条纯静态检查：**没有浏览器也能挡住**。
+ * 只查 `/static/` 下的引用 —— 别的路径不归 serveStatic 管，查了是假警报。
+ */
+for (const m of html.matchAll(/<link\b[^>]*>/g)) {
+  const tag = m[0];
+  const href = (tag.match(/href=["']([^"']+)["']/) || [])[1];
+  // 只关心图标类声明；样式表和脚本各有自己的检查，重复报会让人忽略这个检查
+  if (!href || !/rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/.test(tag)) continue;
+  if (!href.startsWith('/static/')) continue;
+  const target = path.join(WEB, href.slice('/static/'.length).split('?')[0]);
+  if (!fs.existsSync(target)) {
+    fail(`index.html 声明了图标 ${href}，但文件不存在（解析为 ${path.relative(ROOT, target)}）`
+      + ' —— 浏览器会退回去请求 /favicon.ico 拿到 404，UI 冒烟测试会因此失败');
+  }
+}
+if (!problems) ok.push('index.html 声明的图标文件真实存在（浏览器不会再去要 /favicon.ico）');
+
 // ---------------------------------------------------------------- 汇总
 
 console.log('');

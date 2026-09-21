@@ -56,5 +56,10 @@ desktop.ini
 # 保留在本地磁盘上供交接用，但不进公开仓库。
 PROGRESS.md
 
+# 交接工具（D:\AI\tools\dev.js / handoff.js）的产物目录：服务日志、每次验证的
+# 完整输出、断点体检报告。纯开发过程记录，跟 PROGRESS.md 同理，不进公开仓库。
+# 不排除的话，README 教的 `node tools/dev.js` 一跑完，工作区就多一坨未跟踪文件。
+.handoff/
+
 # 本轮重构留下的过程产物（基线快照、提交信息草稿等）
 .refactor/

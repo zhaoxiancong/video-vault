@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Video Vault">
+  <!-- 跟界面同一套配色（styles.css 的 --panel / --amber）：
+       深色圆角底 + 琥珀色「▼」品牌记号，和顶栏的 .brand-mark 是同一个符号。
+       存在的理由不只是好看：没有它时 Chrome 会自动请求 /favicon.ico 拿到 404，
+       而 test/ui/smoke.js 的「没有运行时报错」断言把任何 console error 都算失败，
+       于是那条 UI 冒烟测试在任何机器上都必然报 1 项失败。 -->
+  <rect width="64" height="64" rx="14" fill="#181c22"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="none" stroke="#262c35"/>
+  <path d="M20 22h24L32 42z" fill="#f0a02a"/>
+  <rect x="22" y="46" width="20" height="4" rx="2" fill="#c47f1c"/>
+</svg>
