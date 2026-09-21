@@ -23,6 +23,7 @@ const path = require('node:path');
 
 const { loadConfig } = require('../../src/infra/config');
 const { createMediaTools, isFragment, FRAGMENT_RE } = require('../../src/infra/media');
+const { skipWithout } = require('../helpers/engines');
 
 function freshMedia() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vv-media-'));
@@ -147,7 +148,7 @@ test('findNewest 挑最新的成品', () => {
 
 // ---------------------------------------------------------------- isPlayable
 
-test('isPlayable 对不存在的路径、空文件、垃圾内容都返回 false', () => {
+test('isPlayable 对不存在的路径、空文件、小于 1KB 都返回 false（不需要 ffprobe）', () => {
   const ctx = freshMedia();
   try {
     assert.equal(ctx.media.isPlayable(path.join(ctx.dir, 'nope.mkv')), false);
@@ -159,14 +160,28 @@ test('isPlayable 对不存在的路径、空文件、垃圾内容都返回 false
     const tiny = path.join(ctx.dir, 'tiny.mkv');
     fs.writeFileSync(tiny, Buffer.alloc(100));
     assert.equal(ctx.media.isPlayable(tiny), false, '小于 1KB');
-
-    const junk = path.join(ctx.dir, 'junk.mkv');
-    fs.writeFileSync(junk, Buffer.alloc(5000, 0x41));
-    assert.equal(ctx.media.isPlayable(junk), false, '"文件存在"不等于"文件完整"');
   } finally { ctx.cleanup(); }
 });
 
-test('inspect() 会说明判断依据，而不是只给个布尔', () => {
+/**
+ * 这一条**必须**有真 ffprobe 才有意义。
+ *
+ * "文件存在"不等于"文件完整"这句话，只有 ffprobe 真的读过这个文件才算验证过；
+ * 没有 ffprobe 时 `isPlayable()` 走的是"没验过"分支返回 false —— 结论碰巧也是
+ * false，但那是**蒙对的**。让它照跑，就等于用假绿掩盖"完整性校验根本没生效"。
+ */
+test('isPlayable 对垃圾内容返回 false（要真 ffprobe 才作数）',
+  { skip: skipWithout('ffprobe') }, () => {
+    const ctx = freshMedia();
+    try {
+      const junk = path.join(ctx.dir, 'junk.mkv');
+      fs.writeFileSync(junk, Buffer.alloc(5000, 0x41));
+      assert.equal(ctx.media.isPlayable(junk), false, '"文件存在"不等于"文件完整"');
+    } finally { ctx.cleanup(); }
+  });
+
+test('inspect() 会说明判断依据，而不是只给个布尔',
+  { skip: skipWithout('ffprobe') }, () => {
   const ctx = freshMedia();
   try {
     const junk = path.join(ctx.dir, 'junk.mkv');

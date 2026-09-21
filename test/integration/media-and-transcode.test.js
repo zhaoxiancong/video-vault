@@ -20,8 +20,18 @@ const { createDatabase } = require('../../src/infra/database');
 const { createMediaTools } = require('../../src/infra/media');
 const { createTranscodeService, presetList, TRANSCODE_PRESETS } = require('../../src/app/transcode');
 const { runSync } = require('../../src/infra/subprocess');
+const { skipWithout } = require('../helpers/engines');
 
 const APP_ROOT = path.resolve(__dirname, '..', '..');
+
+/**
+ * 没 ffmpeg 时**整片跳过**（node:test 原生 skip，汇总里单独算"跳过"）。
+ *
+ * 以前这里是 `if (!f) { console.log('⏭'); return; }` —— 汇总显示"✔ 通过"，
+ * 但断言一条都没跑。环境导致的"没测"必须和"测过了"在汇总里长得不一样，
+ * 否则没引擎的机器上会有整片转码测试假绿。
+ */
+const noFFmpeg = skipWithout('ffmpeg');
 
 function freshEnv() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vv-media2-'));
@@ -43,7 +53,11 @@ function freshEnv() {
   };
 }
 
-/** 用 ffmpeg 生成一个几秒钟的真视频（带音轨） */
+/**
+ * 用 ffmpeg 生成一个几秒钟的真视频（带音轨）。
+ * 失败时返回 null，原因留在 `sampleError` 里 —— 跳过也要说清为什么。
+ */
+let sampleError = '';
 function makeSampleVideo(dir, name = 'sample.mkv') {
   const out = path.join(dir, name);
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -56,18 +70,20 @@ function makeSampleVideo(dir, name = 'sample.mkv') {
     out,
   ], { timeout: 120000 });
   if (r.status !== 0 || !fs.existsSync(out)) {
-    return null;   // ffmpeg 不可用就跳过相关测试
+    sampleError = (r.error && r.error.message) || `ffmpeg 退出码 ${r.status}`;
+    return null;
   }
+  sampleError = '';
   return out;
 }
 
 // ---------------------------------------------------------------- 元数据探测
 
-test('ffprobe 能读出真实媒体信息（分辨率/时长/编码）', () => {
+test('ffprobe 能读出真实媒体信息（分辨率/时长/编码）', { skip: noFFmpeg }, (t) => {
   const e = freshEnv();
   try {
     const f = makeSampleVideo(e.tmp);
-    if (!f) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }
+    if (!f) return t.skip(`ffmpeg 在，但生成样片失败：${sampleError}`);
 
     const info = e.media.probe(f);
     assert.ok(info, 'probe 应该返回信息');
@@ -81,11 +97,11 @@ test('ffprobe 能读出真实媒体信息（分辨率/时长/编码）', () => {
   } finally { e.cleanup(); }
 });
 
-test('真实视频被判为可播放，垃圾文件不可播放', () => {
+test('真实视频被判为可播放，垃圾文件不可播放', { skip: noFFmpeg }, (t) => {
   const e = freshEnv();
   try {
     const f = makeSampleVideo(e.tmp);
-    if (!f) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }
+    if (!f) return t.skip(`ffmpeg 在，但生成样片失败：${sampleError}`);
 
     assert.equal(e.media.isPlayable(f), true, '真实视频应该可播放');
 
@@ -97,11 +113,11 @@ test('真实视频被判为可播放，垃圾文件不可播放', () => {
   } finally { e.cleanup(); }
 });
 
-test('探测出的元数据能入库，并且能按标题搜到', () => {
+test('探测出的元数据能入库，并且能按标题搜到', { skip: noFFmpeg }, (t) => {
   const e = freshEnv();
   try {
     const f = makeSampleVideo(e.tmp);
-    if (!f) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }
+    if (!f) return t.skip(`ffmpeg 在，但生成样片失败：${sampleError}`);
 
     const info = e.media.probe(f);
     const v = e.repo.insertVideo({
@@ -150,11 +166,11 @@ test('转码预设清单完整（前端下拉框靠它）', () => {
   }
 });
 
-test('ffmpeg 转码成功，产物可读且是 H.264/MP4', async () => {
+test('ffmpeg 转码成功，产物可读且是 H.264/MP4', { skip: noFFmpeg }, async (t) => {
   const e = freshEnv();
   try {
     const src = makeSampleVideo(e.tmp);
-    if (!src) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }
+    if (!src) return t.skip(`ffmpeg 在，但生成样片失败：${sampleError}`);
 
     const v = e.repo.insertVideo({
       url: 'https://example.com/tc', title: '待转码', status: 'done', file_path: src,
@@ -184,11 +200,11 @@ test('ffmpeg 转码成功，产物可读且是 H.264/MP4', async () => {
   } finally { e.cleanup(); }
 });
 
-test('转码绝不动原始文件（防丢需求：归档层只读）', async () => {
+test('转码绝不动原始文件（防丢需求：归档层只读）', { skip: noFFmpeg }, async (t) => {
   const e = freshEnv();
   try {
     const src = makeSampleVideo(e.tmp);
-    if (!src) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }
+    if (!src) return t.skip(`ffmpeg 在，但生成样片失败：${sampleError}`);
 
     const before = fs.readFileSync(src);
     const beforeStat = fs.statSync(src);
@@ -210,11 +226,11 @@ test('转码绝不动原始文件（防丢需求：归档层只读）', async ()
   } finally { e.cleanup(); }
 });
 
-test('未知预设被拒绝，并列出可用预设', () => {
+test('未知预设被拒绝，并列出可用预设', { skip: noFFmpeg }, (t) => {
   const e = freshEnv();
   try {
     const src = makeSampleVideo(e.tmp);
-    if (!src) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }
+    if (!src) return t.skip(`ffmpeg 在，但生成样片失败：${sampleError}`);
     const v = e.repo.insertVideo({ url: 'https://e/x', title: 'x', status: 'done', file_path: src });
 
     assert.throws(
@@ -228,7 +244,17 @@ test('未知预设被拒绝，并列出可用预设', () => {
   } finally { e.cleanup(); }
 });
 
-test('原始文件不存在时转码被拒绝（给可操作提示）', () => {
+/**
+ * ⚠️ 这条也要 ffmpeg —— 看起来它只测"源文件没了"，其实不是。
+ *
+ * `transcode.start()` 的顺序是**先查 ffmpeg、再查源文件**（transcode.js:110 → :116），
+ * 所以没有 ffmpeg 时抛的是"ffmpeg 不可用"，根本走不到"原始文件不存在"那条分支。
+ * 硬跑这条断言必然失败，而失败原因跟它想测的东西毫无关系 —— 那是**假失败**。
+ *
+ * （不改 start() 的顺序：本轮要求行为完全不变。顺序本身可以再议，
+ *   但"更具体的错误优先"属于行为变更，不该顺手塞进重构。）
+ */
+test('原始文件不存在时转码被拒绝（给可操作提示）', { skip: noFFmpeg }, () => {
   const e = freshEnv();
   try {
     const v = e.repo.insertVideo({
@@ -246,11 +272,11 @@ test('原始文件不存在时转码被拒绝（给可操作提示）', () => {
   } finally { e.cleanup(); }
 });
 
-test('同一个任务不会并发转码两次', async () => {
+test('同一个任务不会并发转码两次', { skip: noFFmpeg }, async (t) => {
   const e = freshEnv();
   try {
     const src = makeSampleVideo(e.tmp);
-    if (!src) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }
+    if (!src) return t.skip(`ffmpeg 在，但生成样片失败：${sampleError}`);
     const v = e.repo.insertVideo({ url: 'https://e/dup', title: 'x', status: 'done', file_path: src });
 
     const done = new Promise((resolve, reject) => {

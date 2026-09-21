@@ -20,6 +20,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { loadConfig, withDefaults, DEFAULT_SETTINGS } = require('../../src/infra/config');
+const { skipWithout } = require('../helpers/engines');
 const { createDownloader } = require('../../src/app/downloader');
 
 const APP_ROOT = path.resolve(__dirname, '..', '..');
@@ -311,7 +312,8 @@ test('引擎自检报告 yt-dlp 与 ffmpeg 的状态', () => {
   } finally { ctx.cleanup(); }
 });
 
-test('yt-dlp 用的是目录式分发（不是 onefile —— onefile 在受限沙箱里自解包会失败）', () => {
+test('yt-dlp 用的是目录式分发（不是 onefile —— onefile 在受限沙箱里自解包会失败）',
+  { skip: skipWithout('ytdlp') }, () => {
   const ctx = freshDownloader();
   try {
     assert.ok(fs.existsSync(ctx.config.paths.ytdlp), `找不到 ${ctx.config.paths.ytdlp}`);

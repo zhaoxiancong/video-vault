@@ -172,7 +172,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 20260920_视频下载工具/
 ├── 启动.cmd / 启动.ps1      ← 双击这个
 ├── src/                     ← 程序本体
-├── test/                    ← 测试（146 项）
+├── test/                    ← 测试（147 项）
 ├── tools/                   ← 辅助脚本（引擎安装、重建库、静态检查）
 ├── downloads/               ← 视频都在这（可在设置里改）
 │   └── _converted/          ← 转码产物
@@ -199,7 +199,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 ## 5. 测试与静态检查
 
 ```powershell
-npm test                    # 全部 146 项
+npm test                    # 全部 147 项
 node test/run.js unit       # 只跑单元测试
 node test/run.js integration # 只跑集成测试
 node test/run.js --verbose  # 带完整输出
@@ -217,15 +217,32 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 | 单元 | `test/unit/errors.test.js` | 8 | 无 |
 | 单元 | `test/unit/progress.test.js` | 21 | 无 |
 | 单元 | `test/unit/downloader.test.js` | 24 | 无（只拼参数，不起进程） |
-| 单元 | `test/unit/media.test.js` | 14 | ffprobe 用于真实文件判定 |
+| 单元 | `test/unit/media.test.js` | 15 | 其中 2 项要真 ffprobe |
 | 集成 | `test/integration/database.test.js` | 15 | 临时目录里的独立数据库 |
 | 集成 | `test/integration/api.test.js` | 23 | 临时目录里的独立实例，走真实 HTTP |
 | 集成 | `test/integration/path-healing.test.js` | 7 | 两个临时目录，模拟项目被搬走 |
-| 集成 | `test/integration/media-and-transcode.test.js` | 10 | 用 ffmpeg 现场生成真视频 |
+| 集成 | `test/integration/media-and-transcode.test.js` | 10 | 用 ffmpeg 现场生成真视频（8 项要 ffmpeg） |
 | 集成 | `test/integration/frontend-dom.test.mjs` | 13 | **DOM 垫片**，不需要浏览器 |
 | 端到端 | `test/e2e/download.test.js` | 2 | **联网**，真的下载一个视频 |
 
 **所有测试都在临时目录里跑**，不碰你的真实库。这是重构带来的直接好处。
+
+> ### 刚 clone 下来没有引擎，测试会「跳过」而不是「失败」
+>
+> `tools/bin/` 下的引擎（约 344MB）**不进 git**，要靠 `npm run setup` 下载。
+> 所以还没装引擎时，有 12 项测试会被标记为**跳过**，并在跳过原因里写明怎么办：
+>
+> ```
+>   ✔ test/unit/media.test.js               13 通过 2 跳过
+>       ﹣ isPlayable 对垃圾内容返回 false（要真 ffprobe 才作数）
+>         # ffprobe 没装（找不到 ...\tools\bin\ffprobe.exe）—— 先跑 `npm run setup` 下载引擎
+> ```
+>
+> **为什么是"跳过"而不是"通过"**：这些项要真有引擎才有意义。以前的写法是
+> 提前 `return`，汇总里显示**通过** —— 一条断言都没跑，却和"真测过了"长得一样，
+> 整片转码测试会在没引擎的机器上集体假绿。环境导致的"没测"和真正的"测过了"
+> 必须长得不一样，这是这个项目吃过的一次亏（见坑 19 那一类）。
+
 
 > `test/e2e/download.test.js` 断言的是完整闭环：下载 → 合并 → ffprobe 入库 →
 > 网页播放 Range → 库查询去重 → 中间分片被清理。它默认**会跑**（约 12 秒）；
@@ -464,6 +481,51 @@ ffprobe 即使加了 `-v error`，也可能在 JSON **前面**吐一行警告
 （就是上面那个 `Invalid mvhd time scale`），于是 parse 失败 → `probe` 返回 null →
 **一个完全正常的视频被判成"损坏"、删掉、重下**。现在从第一个 `{` 开始截取。
 
+### 坑 20：测试"跳过"写成了"提前 return"，于是一片假绿
+
+**症状**：一台没装 ffmpeg 的机器上跑测试，汇总显示
+
+```
+✔ test/integration/media-and-transcode.test.js   9 通过 1 失败
+```
+
+**9 个"通过"里，有 7 个一条断言都没跑。**
+
+**根因**：需要引擎的测试是这么写的：
+
+```js
+const f = makeSampleVideo(e.tmp);
+if (!f) { console.log('  ⏭  ffmpeg 不可用，跳过'); return; }   // ← 测试算"通过"
+```
+
+`return` 只是提前结束函数，node:test 依然把它算作**通过**。于是"没测"
+和"测过了"在汇总里长得一模一样 —— 比直接失败更危险，因为它不会引起注意。
+
+**后果**：整片转码 + 元数据测试（"当剪辑素材用"这个核心需求的实现路径）
+在没有引擎的机器上是**完全空转**的，而报告看起来是绿的。
+
+**改法**：用 node:test 原生跳过，让它在汇总里单独计一栏：
+
+```js
+const noFFmpeg = skipWithout('ffmpeg');          // test/helpers/engines.js
+test('转码绝不动原始文件', { skip: noFFmpeg }, async (t) => { ... });
+```
+
+现在没引擎时是 `2 通过 8 跳过`，并且每条都写明原因和怎么办：
+
+```
+﹣ isPlayable 对垃圾内容返回 false（要真 ffprobe 才作数）
+  # ffprobe 没装（找不到 tools\bin\ffprobe.exe）—— 先跑 `npm run setup` 下载引擎
+```
+
+**顺带修的**：一根"环境导致的失败"也不是真失败。同一次排查里发现
+`原始文件不存在时转码被拒绝` 在没 ffmpeg 的机器上必然失败 ——
+因为 `start()` 是**先查 ffmpeg、再查源文件**，根本走不到那条分支。
+失败原因跟它想测的东西毫无关系，属于**假失败**。这条也归到 `skipWithout('ffmpeg')`。
+
+**一句话**：环境导致的"没测"、和真正的"测过了"，在报告里必须长得不一样。
+同类教训还有坑 15（`kill-safe` 的护栏测试把环境导致的跳过报成"护栏被破坏了"）。
+
 ---
 
 ## 7. 设置项
@@ -504,7 +566,7 @@ ffprobe 即使加了 `-v error`，也可能在 JSON **前面**吐一行警告
 
 ```powershell
 npm start                          # 启动服务
-npm test                           # 全部测试（146 项）
+npm test                           # 全部测试（147 项）
 npm run check                      # 静态检查
 npm run setup                      # 只下载引擎
 
