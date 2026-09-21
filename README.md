@@ -65,6 +65,41 @@
 
 **隐私**：默认不读任何 Cookie，必须显式开启。Cookie 内容不写日志、不入库、不回显。
 
+### 从网站找视频
+
+粘一个**网页地址**（列表页、频道页、站点首页都行），它会找出页面上的视频链接，
+你用关键字筛出想要的，勾选后批量加入下载队列。
+
+- **双路径**：先试 yt-dlp（有解析器的站直接拿到标题、时长、真链接），
+  不行再解析静态 HTML（从链接的 slug/`title` 属性取标题、从页面取时长角标）。
+  界面会显示**走了哪条路** —— 没缩略图时你才知道为什么。
+- **关键字筛选是本地过滤**：空格分词 = AND，`-词` = 排除。敲字即时响应，不重新请求。
+- **候选持久化**：关掉浏览器明天回来还能接着挑，也可以在多页结果之间来回跳。
+- **已在库标记**：爬到的条目会标出"已在库 / ＋新 / 已加入队列"，不会重复下。
+- **翻页不自动**：页面上的翻页链接会列出来，点哪一页就用那个地址再抓一次，
+  **不替换当前结果**（所以第 1 页和第 2 页的候选都在）。
+- 单次最多 200 条，**不会自动翻页凑满**。
+
+#### 爬取纪律（设计约束，不是可调参数）
+
+| 约束 | 值 |
+|---|---|
+| 单次爬取的页面请求数 | **1**（点翻页 = 新一次） |
+| 超时 | 15 秒 |
+| 响应体上限 | 3MB |
+| 并发 | 串行（一次只跑一个爬取） |
+| 单次条数上限 | 200 |
+| User-Agent | 真实浏览器 UA |
+| 跟随页面内链接 | **否**（不整站爬） |
+| robots.txt | 发请求前检查一次并缓存；`Disallow` 命中则**不抓**并说明原因；`Allow`/`Disallow` 冲突取匹配更长的那条 |
+
+**不做的事**：不绕过 Cloudflare 之类的反爬（遇到就明确报错）；不用真浏览器渲染
+JavaScript 页面（服务端抓到的 HTML 里没有链接时会明说"这种站暂不支持"）；
+不做定时自动抓取。
+
+> 慢站超过 20 秒会自动转后台继续抓，界面显示进度；**关掉浏览器也不影响它抓完**，
+> 结果照样入库。
+
 ### 页面状态会记住
 - **最近任务**面板：列出已完成/失败/暂停/取消的任务，每条都能播放、重新下载、看日志、删除
 - 你填的东西持久化在 localStorage：粘贴框内容、清晰度、限速、库页的筛选条件等
@@ -123,7 +158,10 @@ src/
 │   ├── downloader.js       引擎适配：怎么调 yt-dlp 只在这一层
 │   ├── scheduler.js        队列调度 + 单任务生命周期
 │   ├── transcode.js        转码
-│   └── cookies.js          登录态
+│   ├── cookies.js          登录态
+│   ├── crawl-parse.js      抓取结果解析（纯函数、无 IO、最容易测）
+│   ├── crawler.js          双路径抓取：yt-dlp 优先，退到静态 HTML；含 robots 检查
+│   └── discovery.js        爬取任务生命周期：串行、20 秒兜底转后台、事件广播
 │
 ├── http/                   HTTP 层（只做"校验参数 → 调服务 → 返回视图"）
 │   ├── server.js           路由分发 + 错误翻译 + 优雅关闭
@@ -131,7 +169,7 @@ src/
 │   ├── validate.js         参数校验（声明式 schema）
 │   ├── static-and-sse.js   静态资源 + 服务端推送
 │   ├── views.js            出站数据形状（哪些字段能给浏览器看）
-│   └── routes/             videos / library / settings
+│   └── routes/             videos / library / settings / discover
 │
 └── web/                    前端（原生 ES 模块，无构建步骤）
     ├── index.html
@@ -140,7 +178,7 @@ src/
     ├── dom.js              DOM 构造与格式化（el() 保证不拼 innerHTML）
     ├── state.js            全局状态 + localStorage 持久化
     ├── ui.js               toast 与确认框
-    └── views/              add / queue / library / settings / player
+    └── views/              add / discover / queue / library / settings / player
 ```
 
 ### 为什么这么分
@@ -171,7 +209,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 20260920_视频下载工具/
 ├── 启动.cmd / 启动.ps1      ← 双击这个
 ├── src/                     ← 程序本体
-├── test/                    ← 测试（150 项）
+├── test/                    ← 测试（226 项）
 ├── tools/                   ← 辅助脚本（引擎安装、重建库、静态检查）
 ├── downloads/               ← 视频都在这（可在设置里改）
 │   └── _converted/          ← 转码产物
@@ -198,7 +236,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 ## 5. 测试与静态检查
 
 ```powershell
-npm test                    # 全部 150 项
+npm test                    # 全部 226 项
 node test/run.js unit       # 只跑单元测试
 node test/run.js integration # 只跑集成测试
 node test/run.js --verbose  # 带完整输出
@@ -565,7 +603,7 @@ test('转码绝不动原始文件', { skip: noFFmpeg }, async (t) => { ... });
 
 ```powershell
 npm start                          # 启动服务
-npm test                           # 全部测试（150 项）
+npm test                           # 全部测试（226 项）
 npm run check                      # 静态检查
 npm run setup                      # 只下载引擎
 
