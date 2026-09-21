@@ -1,0 +1,15 @@
+{
+  "name": "video-vault",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地网页版视频下载工具：yt-dlp 引擎 + SQLite 视频库 + 实时进度界面。零 npm 依赖。",
+  "type": "commonjs",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "selftest": "node selftest.js"
+  }
+}

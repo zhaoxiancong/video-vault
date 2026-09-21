@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────
+#  只提交代码。下面这些每一条都有理由，别随手删。
+# ─────────────────────────────────────────────────────────────
+
+# 引擎二进制：yt-dlp.exe ~18MB + ffmpeg/ffprobe 各 ~163MB，合计约 344MB。
+# 用 `npm run setup:engine` 拉到 tools/bin/，不要进仓库。
+tools/bin/
+
+# 下载的视频：体积大，而且这是用户自己的媒体内容，绝不该进公开仓库。
+downloads/
+
+# 运行期数据：SQLite 库（含真实观看记录）、每个任务的完整日志、
+# 封面、UI 测试截图。
+# ⚠️ 用户在界面上改过的设置也存在 vault.db 里 —— 那是他的个人数据。
+data/
+
+# 本次重构的工作目录（基线快照、对照脚本等），纯粹是过程产物
+.refactor/
+
+# 参考用的外部 skill 仓库，自带 .git，不属于本项目
+_ref/
+
+# Cookie 文件：这是**登录凭据**，泄露等于账号被盗。
+# 只提交 sample，真实的一个都不许进仓库。
+cookies.txt
+*.cookies.txt
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+coverage/
+*.log
+*.tsbuildinfo
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地环境变量（可能含 token）
+.env
+.env.local
+.env.*.local
+
+# DSH（本机的 AI 工作台）往任务目录里挂的 skill Junction。
+# 它指向工作区别处的另一个 git 仓库，不属于本项目 —— 不排除的话
+# git 会把它当成 embedded repository，clone 下来是个空目录。
+.dsh/

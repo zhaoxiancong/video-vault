@@ -1,0 +1,23 @@
+# 统一换行符。不写这个文件的话，Windows 上 checkout 会得到 CRLF、
+# 而仓库里存的是 LF，于是每次 git status 都显示一堆"改动"，
+# 实际上只是换行符在来回转换 —— 看 diff 全是噪音。
+* text=auto eol=lf
+
+# 这几个必须是 CRLF：Windows 的 .cmd / .ps1 用 LF 换行会出问题
+# （尤其是 .cmd，某些解析器会把整个文件当成一行）。
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# 二进制：不要做任何换行或编码转换
+*.exe  binary
+*.zip  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+
+# 给语言统计一个正确预期：下面的都算"文档"，不算代码
+*.md   linguist-documentation

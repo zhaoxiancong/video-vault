@@ -1,0 +1,28 @@
+# yt-dlp 用的 cookies.txt（Netscape 格式）
+#
+# 这个文件是**格式示例**，不是真凭据 —— 里面的值都是假的。
+# 真正的 cookies.txt 已经在 .gitignore 里，不会被提交。
+#
+# 怎么拿到真的：
+#   在浏览器里装一个 "Get cookies.txt LOCALLY" 之类的扩展，
+#   登录目标站点后导出，导出格式选 Netscape / cookies.txt。
+#   然后在「设置 → 登录态 → 用 cookies.txt 文件」里填它的绝对路径。
+#
+# 字段（每行 7 个，用 TAB 分隔）：
+#   domain  flag  path  secure  expiry  name  value
+#
+#   domain    作用域，前导点表示包含子域
+#   flag      固定 TRUE/FALSE（历史遗留，TRUE 表示 domain 带前导点）
+#   path      生效路径，一般 /
+#   secure    是否仅 HTTPS，TRUE/FALSE
+#   expiry    Unix 时间戳（秒），0 表示会话结束即失效
+#   name      cookie 名
+#   value     cookie 值
+#
+# ⚠️ 必须是 TAB 分隔。从网页上复制粘贴常常会把 TAB 变成空格，
+#    那样 yt-dlp 会报 "does not look like a Netscape format cookies file"。
+
+# Netscape HTTP Cookie File
+# 下面几行是格式示例，值全是假的，直接删掉换成你自己的即可
+.example.com	TRUE	/	FALSE	1900000000	sessionid	PUT-YOUR-REAL-VALUE-HERE
+.example.com	TRUE	/	TRUE	1900000000	secure_token	PUT-YOUR-REAL-VALUE-HERE
