@@ -5,7 +5,7 @@
 
 - **零运行时依赖** —— 只用 Node 内置模块（`node:http` / `node:sqlite`），没有 `node_modules`
 - **前端无构建步骤** —— 原生 ES 模块，改完刷新就生效
-- **引擎**：yt-dlp（1800+ 站点）+ ffmpeg（合并/转码）
+- **引擎**：yt-dlp（1800+ 站点）+ ffmpeg（合并音视频流）
 
 ---
 
@@ -35,10 +35,15 @@
 |---|---|---|
 | **防丢** | 原始文件**只写一次、永不改动**；重名不覆盖；带 URL 去重，同一个片子不会重复下 | 下载目录里的原始文件 |
 | **建库** | 每条下载写进 SQLite：标题/作者/站点/时长/分辨率/编码/简介/封面，支持关键词搜索 + 站点/作者/状态筛选 + 收藏 + 备注 | 「我的库」页 |
-| **剪素材** | 转码产物**另存**在 `downloads/_converted/`，可选「H.264 1080p / 720p」「H.265」「仅换容器 mp4」「抽 MP3」 | 库 → 更多 → 转码 |
+| **找片** | 粘一个网页地址（列表页/频道页），从中找出视频链接，按关键字筛完再勾选入队 | 「找视频」页 |
 
-也就是说：**归档层（原始文件）/ 工作层（转码产物）/ 检索层（数据库）三者分开**，
-互不干扰。你剪坏了转码文件，原始文件还在；你删了库记录，也能选择保留文件。
+> **关于「当剪辑素材用」**：早期版本为此做过一套转码功能
+> （5 个预设、产物另存 `_converted/`）。**后来用户明确说用不到，已整体移除** ——
+> 现在库里只有原始文件，没有任何转码入口。
+> 若将来又需要，那套设计的取舍记录在本文第 6 节（坑 19）里，可以照着重新实现。
+
+也就是说：**原始文件 / 数据库检索两层分开**，互不干扰。
+你删了库记录，也能选择保留磁盘上的文件。
 
 ---
 
@@ -51,7 +56,7 @@
 - **清晰度**：最高可用 / 4K / 2K / 1080p / 720p / 480p / 360p / 最小体积
 - **仅音频**：抽成 MP3
 - **并发 2**（可调）：模拟一个人正常看片的节奏，降低被风控的概率。限速默认关闭，想降风险再开
-- **实时进度**：进度条 + 速度 + 剩余时间 + 当前阶段（下载中 / 合并中 / 转码中）
+- **实时进度**：进度条 + 速度 + 剩余时间 + 当前阶段（下载中 / 合并中 / 抽音频中）
 - **可展开的原始日志**：出问题时能直接看到 yt-dlp 说了什么
 - **暂停 / 继续 / 取消 / 重试 / 删除**
 
@@ -122,15 +127,6 @@ JavaScript 页面（服务端抓到的 HTML 里没有链接时会明说"这种�
 - **网页内直接播放**（支持拖动进度条 —— 服务端实现了 HTTP Range）
 - 收藏、备注、复制文件路径、删除记录（可选是否连文件一起删）
 
-### 转码（剪辑用）
-| 预设 | 说明 |
-|---|---|
-| 仅换容器（mp4） | 秒完成，不重编码；mkv 转 mp4 用这个 |
-| H.264 1080p | **剪辑软件最通用**，推荐 |
-| H.264 720p | 体积小 |
-| H.265 1080p | 更小，老设备可能不认 |
-| 抽音频 MP3 | 当播客听 |
-
 ---
 
 ## 4. 代码结构
@@ -157,7 +153,7 @@ src/
 ├── app/                    应用服务层
 │   ├── downloader.js       引擎适配：怎么调 yt-dlp 只在这一层
 │   ├── scheduler.js        队列调度 + 单任务生命周期
-│   ├── transcode.js        转码
+
 │   ├── cookies.js          登录态
 │   ├── crawl-parse.js      抓取结果解析（纯函数、无 IO、最容易测）
 │   ├── crawler.js          双路径抓取：yt-dlp 优先，退到静态 HTML；含 robots 检查
@@ -209,10 +205,10 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 20260920_视频下载工具/
 ├── 启动.cmd / 启动.ps1      ← 双击这个
 ├── src/                     ← 程序本体
-├── test/                    ← 测试（226 项）
+├── test/                    ← 测试（219 项）
 ├── tools/                   ← 辅助脚本（引擎安装、重建库、静态检查）
 ├── downloads/               ← 视频都在这（可在设置里改）
-│   └── _converted/          ← 转码产物
+
 ├── data/
 │   ├── vault.db             ← 视频库数据库（SQLite）
 │   ├── thumbs/              ← 封面缩略图
@@ -236,14 +232,16 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 ## 5. 测试与静态检查
 
 ```powershell
-npm test                    # 全部 226 项
+npm test                    # 全部 219 项
 node test/run.js unit       # 只跑单元测试
 node test/run.js integration # 只跑集成测试
 node test/run.js --verbose  # 带完整输出
 
-npm run check               # 静态检查（两个都跑）
+npm run check               # 静态检查（三个都跑）
 node tools/lint-undefined.js   # 有没有"调用了未定义函数"（含漏导入模块）
 node tools/check-frontend.js   # 前端一致性（#id 对得上吗、import 路径对不对）
+node tools/check-classes.js    # 渲染出来的类名在样式表里有没有规则
+node tools/screenshot.js       # 真实浏览器逐屏截图（肉眼验版式）
 node test/ui/smoke.js <url>    # 真实浏览器冒烟（需要放宽权限的会话）
 node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 ```
@@ -255,11 +253,13 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 | 单元 | `test/unit/progress.test.js` | 21 | 无 |
 | 单元 | `test/unit/downloader.test.js` | 24 | 无（只拼参数，不起进程） |
 | 单元 | `test/unit/media.test.js` | 15 | 其中 2 项要真 ffprobe |
-| 集成 | `test/integration/database.test.js` | 15 | 临时目录里的独立数据库 |
-| 集成 | `test/integration/api.test.js` | 23 | 临时目录里的独立实例，走真实 HTTP |
-| 集成 | `test/integration/path-healing.test.js` | 7 | 两个临时目录，模拟项目被搬走 |
-| 集成 | `test/integration/media-and-transcode.test.js` | 10 | 用 ffmpeg 现场生成真视频（8 项要 ffmpeg） |
-| 集成 | `test/integration/frontend-dom.test.mjs` | 13 | **DOM 垫片**，不需要浏览器 |
+| 单元 | `test/unit/crawl-parse.test.js` | 22 | 无（对着真实 HTML 夹具解析） |
+| 单元 | `test/unit/crawler.test.js` | 19 | 无（yt-dlp 与 fetch 都是注入的假的） |
+| 单元 | `test/unit/discovery.test.js` | 10 | 无（syncWaitMs 可注入，不等真 20 秒） |
+| 集成 | `test/integration/database.test.js` | 23 | 临时目录里的独立数据库 |
+| 集成 | `test/integration/api.test.js` | 32 | 临时目录里的独立实例，走真实 HTTP |
+| 集成 | `test/integration/path-healing.test.js` | 6 | 两个临时目录，模拟项目被搬走 |
+| 集成 | `test/integration/frontend-dom.test.mjs` | 26 | **DOM 垫片**，不需要浏览器 |
 | 端到端 | `test/e2e/download.test.js` | 2 | **联网**，真的下载一个视频 |
 
 **所有测试都在临时目录里跑**，不碰你的真实库。这是重构带来的直接好处。
@@ -277,7 +277,7 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 >
 > **为什么是"跳过"而不是"通过"**：这些项要真有引擎才有意义。以前的写法是
 > 提前 `return`，汇总里显示**通过** —— 一条断言都没跑，却和"真测过了"长得一样，
-> 整片转码测试会在没引擎的机器上集体假绿。环境导致的"没测"和真正的"测过了"
+> 整片需要引擎的测试会在没引擎的机器上集体假绿。环境导致的"没测"和真正的"测过了"
 > 必须长得不一样，这是这个项目吃过的一次亏（见坑 19 那一类）。
 
 
@@ -303,6 +303,12 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 
 > 垫片自己踩过的坑都写在注释里了，改它之前值得读一遍 ——
 > 最费时间的一类问题是"垫片不够真导致的假失败"：测试红了，被测代码其实是对的。
+>
+> ⚠️ **最严重的一次**是冒泡链断了：`body._parent` 曾是 `null`，而 document 不在冒泡链上，
+> 于是事件走到 body 就停 —— 库页的播放/收藏/更多**全靠 document 上的事件委托**，
+> 它们在前端测试里**从来没被触发过**。真实浏览器里 document 在链上，
+> 所以这是垫片与真实 DOM 的偏差，它让整整一类交互逃过了测试。
+> 现在的链是 `元素 → body → html → document`。
 
 ### 没有浏览器时怎么办
 
@@ -318,6 +324,11 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 ## 6. 开发时踩过的坑（改代码前必读）
 
 这几条都是**实测撞出来的**，不是推测。改相关代码前先看一眼，能省你几个小时。
+
+> ⚠️ **其中几条讲的代码已经不存在了**：转码功能（`src/app/transcode.js`、
+> `startTranscode()`、`_converted/`）已于 2026-09-21 按用户要求**整体移除**。
+> 那些条目**刻意保留** —— 它们记的是"这类错误长什么样、为什么会长期没被发现"，
+> 换一个功能照样会犯。看的时候把函数名当成历史名词即可。
 
 ### 坑 1：子进程输出不能走管道（沙箱限制）
 
@@ -365,7 +376,7 @@ VVP|Merger|started                          ← 后期处理
 ### 坑 5：高清流要合并进 mkv
 
 YouTube 高清普遍是 vp9/av1 + opus，**mp4 容器装不下**，强行 mp4 会让合并直接失败。
-所以视频统一合并进 `.mkv`。想转 mp4 就用转码预设「仅换容器」。
+所以视频统一合并进 `.mkv`。（想转 mp4 请用别的工具 —— 本工具已移除转码功能。）
 
 ### 坑 6：验证语法不要用 `require()`
 
@@ -603,7 +614,7 @@ test('转码绝不动原始文件', { skip: noFFmpeg }, async (t) => { ... });
 
 ```powershell
 npm start                          # 启动服务
-npm test                           # 全部测试（226 项）
+npm test                           # 全部测试（219 项）
 npm run check                      # 静态检查
 npm run setup                      # 只下载引擎
 
@@ -623,7 +634,7 @@ node test/ui/smoke.js <url>        # 真实浏览器冒烟测试
 它扫磁盘上的视频文件（命名规则本身带信息）+ ffprobe + 封面时间戳，把记录重建回来。
 **默认是预演，不加 `--yes` 不会写库。**
 
-无法恢复的：原始 URL、发布时间、简介。文件本身完好，不影响播放、搜索、转码。
+无法恢复的：原始 URL、发布时间、简介。文件本身完好，不影响播放与搜索。
 重新粘一次原始链接就能把 URL 和简介补回来（文件已存在会跳过下载）。
 
 指定端口 / 只监听本机：
