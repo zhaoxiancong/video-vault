@@ -690,6 +690,202 @@ test('分组接口：站点为空的记录归入「未标注站点」，不是�
 // 它们都要先调 POST /api/videos/group-action 才能造出场景，而那个接口是 Task 3 的产物。
 // 放在这里会让 Task 2 停在"有 2 条红着"，看不出是自己坏了还是依赖没到。
 
+// ---------------------------------------------------------------- 分组 CRUD 与批量操作
+
+test('分组 CRUD：建、改名、换色、重名 409、不存在 404', async () => {
+  const s = await startApp();
+  try {
+    const a = await s.call('POST', '/api/groups', { name: '待看', color: 'amber' });
+    assert.equal(a.status, 200);
+    assert.ok(a.data.id > 0);
+    assert.equal(a.data.count, 0);
+
+    // Review Focus 2：只差空格也算重名
+    const dup = await s.call('POST', '/api/groups', { name: ' 待看 ' });
+    assert.equal(dup.status, 409, '重名必须是 409');
+    assert.match(dup.data.error, /已经有/);
+
+    const renamed = await s.call('PATCH', `/api/groups/${a.data.id}`, { name: '稍后看', color: 'blue' });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.data.name, '稍后看');
+    assert.equal(renamed.data.color, 'blue');
+
+    const missing = await s.call('PATCH', '/api/groups/999999', { name: 'x' });
+    assert.equal(missing.status, 404);
+
+    const empty = await s.call('POST', '/api/groups', { name: '   ' });
+    assert.equal(empty.status, 400, '空名字要 400');
+
+    const list = await s.call('GET', '/api/groups');
+    assert.equal(list.status, 200);
+    assert.equal(list.data.groups.length, 1, 'GET /api/groups 必须返回列表，不能被 :id 吃掉');
+  } finally { await s.cleanup(); }
+});
+
+test('分组 CRUD：删分组默认只解散，视频记录一条不少', async () => {
+  const s = await startApp();
+  try {
+    await s.call('POST', '/api/videos', { urls: 'https://x/1' });
+    const lib = await s.call('GET', '/api/library');
+    const id = lib.data.rows[0].id;
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+    await s.call('POST', '/api/videos/group-action', { ids: [id], add: [g.data.id] });
+
+    const del = await s.call('DELETE', `/api/groups/${g.data.id}`);   // 默认 detach
+    assert.equal(del.status, 200);
+    assert.equal(del.data.mode, 'detach');
+    assert.equal(del.data.removedVideos, 0);
+
+    assert.equal((await s.call('GET', '/api/library')).data.total, 1, 'detach 不能删视频');
+    assert.equal((await s.call('GET', '/api/groups')).data.groups.length, 0);
+  } finally { await s.cleanup(); }
+});
+
+test('分组 CRUD：mode 不合法时 400 并说明两种模式的差别', async () => {
+  const s = await startApp();
+  try {
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+    const r = await s.call('DELETE', `/api/groups/${g.data.id}?mode=nuke`);
+    assert.equal(r.status, 400);
+    assert.match(r.data.hint || '', /detach/);
+  } finally { await s.cleanup(); }
+});
+
+test('分组 CRUD：purge 删库记录但磁盘文件保留', async () => {
+  const s = await startApp();
+  try {
+    await s.call('POST', '/api/videos', { urls: 'https://x/1' });
+    const lib = await s.call('GET', '/api/library');
+    const id = lib.data.rows[0].id;
+    const file = path.join(s.tmp, 'downloads', 'keep.mp4');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'bytes');
+    s.app.repo.updateVideo(id, { file_path: file, status: 'done' });
+
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+    await s.call('POST', '/api/videos/group-action', { ids: [id], add: [g.data.id] });
+
+    const del = await s.call('DELETE', `/api/groups/${g.data.id}?mode=purge`);
+    assert.equal(del.data.mode, 'purge');
+    assert.equal(del.data.removedVideos, 1);
+    assert.equal((await s.call('GET', '/api/library')).data.total, 0, '库记录要没了');
+    assert.ok(fs.existsSync(file), '⚠️ purge 绝不能删磁盘文件');
+  } finally { await s.cleanup(); }
+});
+
+test('批量入组：部分 id 不存在时忽略并如实报 affected（Review Focus 5）', async () => {
+  const s = await startApp();
+  try {
+    await s.call('POST', '/api/videos', { urls: 'https://x/1' });
+    const lib = await s.call('GET', '/api/library');
+    const real = lib.data.rows[0].id;
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+
+    const r = await s.call('POST', '/api/videos/group-action', {
+      ids: [real, 999999], add: [g.data.id],
+    });
+    assert.equal(r.status, 200, '不能整体 500');
+    assert.equal(r.data.affected, 1, '只影响真实存在的那条');
+    assert.ok(r.data.errors.length >= 1, '要如实报告被忽略的 id');
+    assert.ok(r.data.errors[0].reason, 'errors 里要有可读的原因');
+  } finally { await s.cleanup(); }
+});
+
+test('批量入组：分组不存在时如实报错，不是静默成功', async () => {
+  const s = await startApp();
+  try {
+    await s.call('POST', '/api/videos', { urls: 'https://x/1' });
+    const id = (await s.call('GET', '/api/library')).data.rows[0].id;
+    const r = await s.call('POST', '/api/videos/group-action', { ids: [id], add: [999999] });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.added, 0);
+    assert.ok(r.data.errors.some((x) => /分组/.test(x.reason)), '要说清是分组没了');
+  } finally { await s.cleanup(); }
+});
+
+test('批量入组：既没给 add 也没给 remove 时 400', async () => {
+  const s = await startApp();
+  try {
+    const r = await s.call('POST', '/api/videos/group-action', { ids: [1] });
+    assert.equal(r.status, 400);
+    assert.ok(r.data.hint);
+  } finally { await s.cleanup(); }
+});
+
+test('批量收藏：一次请求搞定，且不被 :id 路由吃掉', async () => {
+  const s = await startApp();
+  try {
+    const ids = [];
+    for (const url of ['https://x/1', 'https://x/2']) {
+      await s.call('POST', '/api/videos', { urls: url });
+      const lib = await s.call('GET', '/api/library');
+      ids.push(lib.data.rows.find((r) => r.url === url).id);
+    }
+
+    const star = await s.call('POST', '/api/videos/bulk-action', { ids, action: 'star' });
+    assert.equal(star.status, 200, '不能被 /api/videos/:id/action 吃掉返回 400');
+    assert.equal(star.data.affected, 2);
+    assert.ok((await s.call('GET', '/api/library')).data.rows.every((r) => r.starred === true),
+      '两条都要变成已收藏');
+
+    const unstar = await s.call('POST', '/api/videos/bulk-action', { ids, action: 'unstar' });
+    assert.equal(unstar.data.affected, 2);
+    assert.ok((await s.call('GET', '/api/library')).data.rows.every((r) => r.starred === false));
+  } finally { await s.cleanup(); }
+});
+
+test('批量收藏：action 不合法时报 400 并列出可用值', async () => {
+  const s = await startApp();
+  try {
+    const r = await s.call('POST', '/api/videos/bulk-action', { ids: [1], action: 'nuke' });
+    assert.equal(r.status, 400);
+    assert.match(r.data.hint || '', /star/);
+  } finally { await s.cleanup(); }
+});
+
+test('批量收藏：id 全不存在时 affected=0，不报错', async () => {
+  const s = await startApp();
+  try {
+    const r = await s.call('POST', '/api/videos/bulk-action', { ids: [999999], action: 'star' });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.affected, 0);
+  } finally { await s.cleanup(); }
+});
+
+// ---------------------------------------------------------------- Task 3 补做的两条（依赖 group-action）
+
+test('分组接口：按自定义分组 —— 未分组要有自己的段（Review Focus 3）', async () => {
+  const s = await startApp();
+  try {
+    const ids = await seedSites(s, [
+      ['https://x/1', 'Youtube'], ['https://x/2', 'Youtube'], ['https://x/3', 'Youtube'],
+    ]);
+    const g = await s.call('POST', '/api/groups', { name: '待看', color: 'amber' });
+    await s.call('POST', '/api/videos/group-action', { ids: [ids[0]], add: [g.data.id] });
+
+    const r = await s.call('GET', '/api/library/grouped?by=group');
+    const keys = r.data.groups.map((x) => x.key);
+    assert.ok(keys.includes('__ungrouped__'), '未分组必须单独成段');
+    assert.equal(r.data.groups.find((x) => x.key === String(g.data.id)).count, 1);
+    assert.equal(r.data.groups.find((x) => x.key === '__ungrouped__').count, 2);
+  } finally { await s.cleanup(); }
+});
+
+test('分组接口：一个视频同时在两个组里时，两组都要有它', async () => {
+  const s = await startApp();
+  try {
+    const ids = await seedSites(s, [['https://x/1', 'Youtube']]);
+    const g1 = await s.call('POST', '/api/groups', { name: '待看' });
+    const g2 = await s.call('POST', '/api/groups', { name: '教程' });
+    await s.call('POST', '/api/videos/group-action', { ids, add: [g1.data.id, g2.data.id] });
+
+    const r = await s.call('GET', '/api/library/grouped?by=group');
+    assert.equal(r.data.groups.find((g) => g.name === '待看').count, 1);
+    assert.equal(r.data.groups.find((g) => g.name === '教程').count, 1);
+    assert.ok(!r.data.groups.some((g) => g.key === '__ungrouped__'), '没有未分组时不该造这个段');
+  } finally { await s.cleanup(); }
+});
+
 test('分组接口：空分组也返回且 count=0（Review Focus 4）', async () => {
   const s = await startApp();
   try {

@@ -132,6 +132,91 @@ function register(router, ctx) {
     return json(res, 202, report);
   });
 
+  // ---------------------------------------------------------------- 批量操作（分组 / 收藏）
+  //
+  // ⚠️ 这两条**必须注册在 `/api/videos/:id/...` 之前**。路由是按注册顺序匹配的，
+  //    虽然 `:id` 那条只认数字（`bulk-action` 会被 `Number()` 成 NaN 而落到 400），
+  //    但"靠参数校验兜住"比"靠注册顺序兜住"脆 —— 测试里有一条专门钉这件事
+  //    （批量收藏不能被 :id 那条吃掉返回 400）。
+
+  /**
+   * 批量入组 / 出组。
+   *
+   * 部分成功要好过整体回滚：批量里混有已被删掉的 id 是常态，
+   * 该忽略的忽略、该报的报，其余照常生效。
+   */
+  router.post('/api/videos/group-action', async (req, res) => {
+    const body = await readJsonBody(req);
+    const numList = (v) => (Array.isArray(v) ? v.map(Number).filter(Number.isInteger) : []);
+    const ids = numList(body.ids);
+    const add = numList(body.add);
+    const remove = numList(body.remove);
+
+    if (!ids.length) {
+      throw new ValidationError('没有选中任何视频', { hint: '先勾选几条。' });
+    }
+    if (!add.length && !remove.length) {
+      throw new ValidationError('没有指定要加入或移出哪个分组', {
+        hint: 'add 或 remove 至少给一个分组 id。',
+      });
+    }
+
+    const errors = [];
+    const live = new Set(repo.listVideosAll({}).map((v) => v.id));
+    const missingVideos = ids.filter((id) => !live.has(id));
+    for (const id of missingVideos) errors.push({ id, reason: '这条视频已经不在了' });
+
+    const groupIds = new Set(repo.listGroups().map((g) => g.id));
+    let added = 0;
+    let removed = 0;
+
+    for (const gid of add) {
+      if (!groupIds.has(gid)) { errors.push({ id: gid, reason: '这个分组已经不在了' }); continue; }
+      added += repo.addToGroup(ids, gid);
+    }
+    for (const gid of remove) {
+      if (!groupIds.has(gid)) { errors.push({ id: gid, reason: '这个分组已经不在了' }); continue; }
+      removed += repo.removeFromGroup(ids, gid);
+    }
+
+    return json(res, 200, {
+      added, removed,
+      affected: ids.length - missingVideos.length,
+      errors,
+    });
+  });
+
+  /**
+   * 批量收藏 / 取消收藏。
+   *
+   * 为什么单独开一个入口：前端循环发 N 次 `/:id/action` 会有 N 个请求，
+   * 既慢又容易撞上服务端并发。内部**复用 repo.updateVideo**（与单条动作同一条写路径），
+   * 不复制逻辑。
+   */
+  const BULK_ACTIONS = ['star', 'unstar'];
+  router.post('/api/videos/bulk-action', async (req, res) => {
+    const body = await readJsonBody(req);
+    const action = String((body && body.action) || '');
+    if (!BULK_ACTIONS.includes(action)) {
+      throw new ValidationError(`不支持的批量动作：${action || '(空)'}`, {
+        hint: `可用的：${BULK_ACTIONS.join(' / ')}`,
+      });
+    }
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isInteger) : [];
+    if (!ids.length) {
+      throw new ValidationError('没有选中任何视频', { hint: '先勾选几条。' });
+    }
+
+    let affected = 0;
+    for (const id of ids) {
+      if (!repo.getVideo(id)) continue;     // 不存在的跳过，不报错
+      repo.updateVideo(id, { starred: action === 'star' });
+      affected += 1;
+    }
+    broadcast('library', { changed: true });
+    return json(res, 200, { affected });
+  });
+
 
   // ---------------------------------------------------------------- 只解析不入队（预览用）
 
