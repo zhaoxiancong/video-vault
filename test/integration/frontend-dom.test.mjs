@@ -41,10 +41,24 @@ const HTML = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
  */
 const appUrl = (bust) => `${new URL(`file:///${path.join(WEB, 'app.js').replace(/\\/g, '/')}`).href}?v=${bust}`;
 
-/** 起一个装好 DOM 的环境，并把前端入口 import 进来 */
+/**
+ * 起一个装好 DOM 的环境，并把前端入口 import 进来。
+ *
+ * ⚠️ **`resetPrefs()` 这一步不能省。**
+ *
+ * `?v=` 只破坏 `app.js` 自己的缓存 —— 它 import 的 `state.js` 在同一个进程里
+ * 是**同一个模块实例**。垫片每个用例只重置 DOM 与 localStorage，不重置模块状态，
+ * 于是"上一条用例把展示维度设成了 site、勾了两条"会整套漏到下一条用例里。
+ * 表现是一批看起来很随机的失败（某条单独跑是绿的、跟别的用例一起跑就红）。
+ *
+ * 在 import 之后重置是**有效**的：`resetPrefs()` 改的是同一个 `state` 对象，
+ * 而 `init()` 里的首次 `reload()` 是异步的（`setTimeout(0)`），会在重置之后才跑到。
+ */
 async function bootFrontend({ responses = {} } = {}) {
   const dom = installDom({ html: HTML, responses });
   const mod = await import(appUrl(`${Date.now()}-${Math.random()}`));
+  const { resetPrefs } = await import(new URL(`file:///${path.join(WEB, 'state.js').replace(/\\/g, '/')}`).href);
+  resetPrefs();
   // 前端是 deferred 语义；垫片里 setTimeout(fn,0) 的初始化要给它一次机会
   await new Promise((r) => setTimeout(r, 10));
   return { dom, mod };
@@ -915,5 +929,180 @@ test('库页分组：标题里的尖括号原样保留（防注入）', async ()
     const name = globalThis.document.querySelector('#libGrid .grp-name');
     assert.equal(name.textContent, nasty, '文本原样保留');
     assert.equal(name.children.length, 0, '不该被解析成子元素');
+  } finally { dom.restore(); }
+});
+
+// ---------------------------------------------------------------- 多选与批量操作
+
+/** 两条平铺记录 + 可用的批量接口响应 */
+function multiResponses() {
+  const row = (id, title) => ({
+    id, url: `https://x/${id}`, title, status: 'done',
+    created_at: '2026-09-22 10:00', file_path: `D:\\dl\\${id}.mp4`, starred: false,
+  });
+  return {
+    ...fakeResponses(),
+    'GET /api/library': { total: 2, rows: [row(1, 'a'), row(2, 'b')] },
+    'GET /api/groups': { groups: [{ id: 9, name: '待看', color: 'amber', count: 0 }] },
+    'POST /api/videos/bulk-action': (req) => ({ affected: (req.params && 2) || 2 }),
+    'POST /api/videos/group-action': { added: 2, removed: 0, affected: 2, errors: [] },
+  };
+}
+
+/** 切到库页并勾上多选 */
+async function bootMulti() {
+  const booted = await bootFrontend({ responses: multiResponses() });
+  globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+  await new Promise((r) => setTimeout(r, 40));
+  const box = globalThis.document.getElementById('libMulti');
+  box.checked = true;
+  box.dispatchEvent(new globalThis.Event('change'));
+  await new Promise((r) => setTimeout(r, 40));
+  return booted;
+}
+
+/** 勾选第 n 张卡片的勾选框 */
+async function tick(n) {
+  const boxes = [...globalThis.document.querySelectorAll('#libGrid .pick')];
+  assert.ok(boxes[n], `应当有第 ${n + 1} 个勾选框，实际只有 ${boxes.length} 个`);
+  boxes[n].checked = true;
+  boxes[n].dispatchEvent(new globalThis.Event('change'));
+  await new Promise((r) => setTimeout(r, 20));
+}
+
+test('库页多选：勾上多选后，每张卡片出现勾选框', async () => {
+  const { dom } = await bootMulti();
+  try {
+    assert.equal(globalThis.document.querySelectorAll('#libGrid .pick').length, 2,
+      '两条记录要有两个勾选框');
+    // 没勾任何东西时，批量条不出现
+    assert.equal(globalThis.document.getElementById('libBulkBar').hidden, true);
+  } finally { dom.restore(); }
+});
+
+test('库页多选：勾选后出现「已选 N 条」与批量按钮', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    const bar = globalThis.document.getElementById('libBulkBar');
+    assert.equal(bar.hidden, false, '勾了东西就该出现批量条');
+    assert.match(bar.textContent, /已选 1 条/, `实际内容：${bar.textContent}`);
+
+    await tick(1);
+    assert.match(bar.textContent, /已选 2 条/, '再勾一条要变成 2');
+
+    // 取消勾选要减回去
+    const boxes = [...globalThis.document.querySelectorAll('#libGrid .pick')];
+    boxes[0].checked = false;
+    boxes[0].dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.match(bar.textContent, /已选 1 条/);
+  } finally { dom.restore(); }
+});
+
+test('库页多选：批量收藏**只发一个请求**，不是循环发 N 个', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    await tick(1);
+
+    const btn = [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '收藏');
+    assert.ok(btn, `批量条里应当有「收藏」按钮，实际：${globalThis.document.getElementById('libBulkBar').textContent}`);
+    btn.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const posts = dom.calls.filter((c) => c.method === 'POST' && c.url.includes('bulk-action'));
+    assert.equal(posts.length, 1, `批量收藏应当只发 1 个请求，实际 ${posts.length} 个`);
+    assert.equal(posts[0].body.action, 'star');
+    assert.deepEqual(posts[0].body.ids.slice().sort(), [1, 2], '两条 id 都要带上');
+
+    // 反向：不能是"逐条调 action 接口"
+    const singles = dom.calls.filter((c) => /\/api\/videos\/\d+\/action/.test(c.url));
+    assert.equal(singles.length, 0, `不该逐条发 action 请求，实际 ${singles.length} 个`);
+  } finally { dom.restore(); }
+});
+
+test('库页多选：加入分组会带上选中的 id 与目标分组', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    const sel = globalThis.document.querySelector('#libBulkBar select');
+    assert.ok(sel, '批量条里应当有分组下拉');
+
+    sel.value = '9';
+    sel.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 60));
+
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('group-action'));
+    assert.ok(hit, '要真的发 group-action 请求');
+    assert.deepEqual(hit.body.ids, [1]);
+    assert.deepEqual(hit.body.add, [9]);
+  } finally { dom.restore(); }
+});
+
+test('库页多选：「取消选择」清空批量条', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    const btn = [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '取消选择');
+    assert.ok(btn);
+    btn.click();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(globalThis.document.getElementById('libBulkBar').hidden, true,
+      '取消选择后批量条应当收起来');
+  } finally { dom.restore(); }
+});
+
+test('库页多选：换筛选条件会清空多选（避免"选中的东西看不见了"）', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /已选 1 条/);
+
+    // 改一个筛选（这里用"仅收藏"）
+    const star = globalThis.document.getElementById('libStarred');
+    star.checked = true;
+    star.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 60));
+
+    assert.equal(globalThis.document.getElementById('libBulkBar').hidden, true,
+      '换了筛选就不该还留着上次的选中状态');
+  } finally { dom.restore(); }
+});
+
+test('库页多选：分组模式也能勾选（勾选框在分组内容里）', async () => {
+  const { dom } = await bootFrontend({
+    responses: {
+      ...multiResponses(),
+      'GET /api/library/grouped': (req) => ({
+        by: req.params.get('by') || 'site', total: 1, shown: 1, truncated: false, cap: 2000,
+        groups: [{ key: 'Youtube', id: null, name: 'Youtube', color: null, count: 1, rows: [
+          { id: 1, url: 'https://x/1', title: 'a', status: 'done', created_at: '2026-09-22 10:00', file_path: 'D:\\1.mp4', starred: false },
+        ] }],
+      }),
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 40));
+    const m = globalThis.document.getElementById('libMulti');
+    m.checked = true;
+    m.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    await chooseGroupBy('site');
+    const boxes = [...globalThis.document.querySelectorAll('#libGrid .grp-body .pick')];
+    assert.equal(boxes.length, 1, '分组里的卡片也要有勾选框');
+    boxes[0].checked = true;
+    boxes[0].dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('bulk-action'));
+    // 还没点批量按钮，所以这时候不该有请求；先确认批量条出现了
+    assert.equal(globalThis.document.getElementById('libBulkBar').hidden, false,
+      '在分组里勾选也要能触发批量条');
+    assert.equal(hit, undefined, '没点批量按钮之前不该发请求');
   } finally { dom.restore(); }
 });

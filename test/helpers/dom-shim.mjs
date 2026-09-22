@@ -121,7 +121,8 @@ export class FakeElement extends FakeNode {
     this.checked = false;
     this.disabled = false;
     this.hidden = false;
-    this.textContent = '';
+    // textContent 是原型上的访问器（递归收集子节点文本），这里**不能**再赋一个
+    // 普通属性把它盖掉 —— 盖掉之后有子节点的元素读出来永远是空字符串。
     this.href = '';
     this.src = '';
     this.files = [];
@@ -164,6 +165,34 @@ export class FakeElement extends FakeNode {
   set hidden(v) {
     if (v) this._attrs.hidden = '';
     else delete this._attrs.hidden;
+  }
+
+  /**
+   * `textContent` 必须**递归**收集子节点的文本 —— 这是它区别于 `innerText` 的
+   * 核心语义，也是这个垫片里最容易写错、错了最难发现的一处。
+   *
+   * 踩过的坑：它曾经只是个普通字符串属性（构造里 `this.textContent = ''`），
+   * 于是 `el('div', {}, [el('span', {text: '已选 1 条'})])` 这种**有子节点**的元素，
+   * `textContent` 读出来是空字符串。表现是"断言文案失败，但界面其实是对的"，
+   * 而且用 `children.length` 一看又是对的 —— 非常费解。
+   *
+   * 现在：读 = 自己所有子孙文本拼接（与规范一致，不含注释）；
+   *      写 = 清空子节点并放一个文本节点（这正是 `replace(bar, [...])` 依赖的行为）。
+   */
+  get textContent() {
+    let out = '';
+    for (const c of this._children) {
+      if (c instanceof FakeText) out += c.textContent;
+      else if (c instanceof FakeElement) out += c.textContent;
+    }
+    return out;
+  }
+
+  set textContent(v) {
+    this._children = [];
+    if (v === null || v === undefined) return;
+    const s = String(v);
+    if (s) this._children.push(new FakeText(s, this.ownerDocument));
   }
 
   setAttribute(k, v) { this._attrs[k] = String(v); }
