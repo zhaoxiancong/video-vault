@@ -164,6 +164,27 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_candidates_run ON candidates(run_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_lib ON candidates(in_library);
+
+-- ───────────────────────────── 库页分组 ─────────────────────────────
+-- 自定义分组。name 用 UNIQUE：重名要 409，不能建出两个肉眼一样的组。
+-- color 存**预设色的 key**（不是色值）—— 以后调色板变了，旧数据仍是合法 key。
+CREATE TABLE IF NOT EXISTS groups (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,
+  color       TEXT NOT NULL DEFAULT 'amber',
+  sort_order  INTEGER DEFAULT 0,
+  created_at  TEXT DEFAULT (datetime('now','localtime'))
+);
+
+-- 视频 ↔ 分组，多对多。**不在这个表里 = 未分组**。
+-- ON DELETE CASCADE：删视频时关系自动清掉，不留悬空行。
+CREATE TABLE IF NOT EXISTS video_groups (
+  video_id   INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+  group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  added_at   TEXT DEFAULT (datetime('now','localtime')),
+  PRIMARY KEY (video_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vg_group ON video_groups(group_id);
 `;
 
 /** 路径自愈时认作"本项目自己的"子目录（只有这两个，避免误伤用户的外部目录） */
@@ -409,10 +430,17 @@ function createDatabase(config, options = {}) {
     return getVideo(id);
   }
 
-  /** 库查询：关键词 + 状态 + 站点 + 作者 + 排序 */
-  function listVideos({
-    q = '', status = '', site = '', uploader = '', starred = false,
-    sort = 'created_desc', limit = 200, offset = 0,
+  /**
+   * 库查询的筛选与排序 —— `listVideos`（分页）与 `listVideosAll`（全集）**共用**。
+   *
+   * 抽出来是因为分组需要"筛选后的全集"。如果复制一份 WHERE 出来，
+   * 两边的筛选条件迟早会不一致 —— 那种 bug 表现为"分组里的条数跟列表对不上"，
+   * 而且很难查（两个地方看起来都对）。抽共享片段就没有这个可能。
+   *
+   * @returns {{whereSql:string, args:any[], orderBy:string}}
+   */
+  function buildVideoQuery({
+    q = '', status = '', site = '', uploader = '', starred = false, sort = 'created_desc',
   } = {}) {
     const where = [];
     const args = [];
@@ -433,14 +461,33 @@ function createDatabase(config, options = {}) {
       size_desc: 'file_size DESC',
       duration_desc: 'duration DESC',
     };
-    const orderBy = sorts[sort] || sorts.created_desc;
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    return {
+      whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+      args,
+      orderBy: sorts[sort] || sorts.created_desc,
+    };
+  }
+
+  /** 库查询：关键词 + 状态 + 站点 + 作者 + 排序 */
+  function listVideos(filters = {}) {
+    const { limit = 200, offset = 0 } = filters;
+    const { whereSql, args, orderBy } = buildVideoQuery(filters);
 
     const rows = db.prepare(
       `SELECT * FROM videos ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
     ).all(...args, limit, offset);
     const total = db.prepare(`SELECT COUNT(*) AS n FROM videos ${whereSql}`).get(...args).n;
     return { rows: rows.map(fromRow), total };
+  }
+
+  /**
+   * 与 `listVideos` 同一套筛选与排序，但**不分页**。
+   * 分组要用它 —— 分组名后面的条数必须是全量条数，不是"这一页里有多少条"。
+   */
+  function listVideosAll(filters = {}) {
+    const { whereSql, args, orderBy } = buildVideoQuery(filters);
+    return db.prepare(`SELECT * FROM videos ${whereSql} ORDER BY ${orderBy}`)
+      .all(...args).map(fromRow);
   }
 
   function facets() {
@@ -764,6 +811,160 @@ function createDatabase(config, options = {}) {
     return Number(r.changes) || 0;
   }
 
+  // ---------------------------------------------------------------- 分组
+
+  /**
+   * 分组名归一化：去首尾空白 + 合并内部空白。名字本身保留这份清理后的样子。
+   *
+   * ⚠️ 查重另外用 `COLLATE NOCASE`（大小写不敏感）。只差一个空格或大小写的两个名字
+   * 在界面上看起来一模一样，用户会分不清点哪个 —— 所以都算重名，返回 409。
+   */
+  const normGroupName = (name) => String(name == null ? '' : name).trim().replace(/\s+/g, ' ');
+
+  function groupOut(row) {
+    return {
+      id: row.id, name: row.name, color: row.color,
+      created_at: row.created_at, count: Number(row.count) || 0,
+    };
+  }
+
+  /**
+   * 所有自定义分组 + 每组条数。**含 0 条的组** ——
+   * 刚建的分组如果因为"空"而不显示，用户会以为没建成。
+   */
+  function listGroups() {
+    return db.prepare(`
+      SELECT g.id, g.name, g.color, g.created_at,
+             (SELECT COUNT(*) FROM video_groups vg WHERE vg.group_id = g.id) AS count
+        FROM groups g
+       ORDER BY g.created_at ASC, g.id ASC
+    `).all().map(groupOut);
+  }
+
+  function createGroup({ name, color = 'amber' } = {}) {
+    const { ValidationError } = require('../domain/errors');
+    const clean = normGroupName(name);
+    if (!clean) {
+      throw new ValidationError('分组名不能为空', { hint: '给它起个名字，比如「待看」。' });
+    }
+    if (clean.length > 40) {
+      throw new ValidationError('分组名太长了（最多 40 个字符）', { hint: '短一点更好认。' });
+    }
+    const dup = db.prepare('SELECT id FROM groups WHERE name = ? COLLATE NOCASE').get(clean);
+    if (dup) {
+      throw new ValidationError(`已经有叫「${clean}」的分组了`, {
+        status: 409, hint: '换一个名字，或者直接用现有的那个。',
+      });
+    }
+    const info = db.prepare('INSERT INTO groups (name, color) VALUES (?, ?)')
+      .run(clean, String(color));
+    const row = db.prepare('SELECT id, name, color, created_at FROM groups WHERE id = ?')
+      .get(Number(info.lastInsertRowid));
+    return groupOut({ ...row, count: 0 });
+  }
+
+  function updateGroup(id, { name, color } = {}) {
+    const { ValidationError } = require('../domain/errors');
+    const gid = Number(id);
+    const cur = db.prepare('SELECT * FROM groups WHERE id = ?').get(gid);
+    if (!cur) return null;
+
+    const patch = {};
+    if (name !== undefined) {
+      const clean = normGroupName(name);
+      if (!clean) throw new ValidationError('分组名不能为空', { hint: '给它起个名字。' });
+      if (clean.length > 40) throw new ValidationError('分组名太长了（最多 40 个字符）');
+      const dup = db.prepare('SELECT id FROM groups WHERE name = ? COLLATE NOCASE AND id <> ?')
+        .get(clean, gid);
+      if (dup) {
+        throw new ValidationError(`已经有叫「${clean}」的分组了`, { status: 409, hint: '换一个名字。' });
+      }
+      patch.name = clean;
+    }
+    if (color !== undefined) patch.color = String(color);
+
+    const cols = Object.keys(patch);
+    if (cols.length) {
+      db.prepare(`UPDATE groups SET ${cols.map((c) => `${c}=?`).join(',')} WHERE id=?`)
+        .run(...cols.map((c) => patch[c]), gid);
+    }
+    return listGroups().find((g) => g.id === gid) || null;
+  }
+
+  /**
+   * 删分组。两种模式（spec 3.1）：
+   *   `detach`（默认）：只删关系行，**视频记录一条不少**
+   *   `purge`         ：删掉组内视频的**库记录**（CASCADE 顺手清关系），
+   *                     **磁盘文件一律不动**
+   *
+   * ⚠️ `purge` 不删文件是刻意的：与项目现有的删除语义一致 ——
+   *    "记录和文件一起永久删除"是列表里另一个带二次确认的路径。
+   *    文件名叫 purge 很容易让人以为连文件一起清了，所以这里的注释和
+   *    界面文案都必须写明"磁盘文件保留"。
+   */
+  function deleteGroup(id, { mode = 'detach' } = {}) {
+    const gid = Number(id);
+    if (!db.prepare('SELECT id FROM groups WHERE id = ?').get(gid)) return null;
+    const useMode = mode === 'purge' ? 'purge' : 'detach';
+
+    let removedVideos = 0;
+    transaction(() => {
+      if (useMode === 'purge') {
+        const ids = db.prepare('SELECT video_id FROM video_groups WHERE group_id = ?')
+          .all(gid).map((r) => r.video_id);
+        if (ids.length) {
+          const marks = ids.map(() => '?').join(',');
+          removedVideos = db.prepare(`DELETE FROM videos WHERE id IN (${marks})`).run(...ids).changes;
+        }
+      }
+      db.prepare('DELETE FROM groups WHERE id = ?').run(gid);
+    });
+    return { mode: useMode, removedVideos: Number(removedVideos) || 0 };
+  }
+
+  /** 批量入组。幂等（INSERT OR IGNORE）；不存在的视频/分组直接跳过 */
+  function addToGroup(videoIds, groupId) {
+    const gid = Number(groupId);
+    if (!db.prepare('SELECT id FROM groups WHERE id = ?').get(gid)) return 0;
+    const exists = db.prepare('SELECT id FROM videos WHERE id = ?');
+    const stmt = db.prepare('INSERT OR IGNORE INTO video_groups (video_id, group_id) VALUES (?, ?)');
+    let added = 0;
+    transaction(() => {
+      for (const raw of videoIds || []) {
+        const vid = Number(raw);
+        if (!Number.isInteger(vid)) continue;
+        if (!exists.get(vid)) continue;
+        added += Number(stmt.run(vid, gid).changes) || 0;
+      }
+    });
+    return added;
+  }
+
+  /** 批量出组。只摘关系，视频记录不动 */
+  function removeFromGroup(videoIds, groupId) {
+    const list = (videoIds || []).map(Number).filter(Number.isInteger);
+    if (!list.length) return 0;
+    const marks = list.map(() => '?').join(',');
+    return Number(db.prepare(
+      `DELETE FROM video_groups WHERE group_id = ? AND video_id IN (${marks})`,
+    ).run(Number(groupId), ...list).changes) || 0;
+  }
+
+  /** 一批视频各自属于哪些分组 —— 前端据此标"这条在哪几个组里" */
+  function groupIdsFor(videoIds) {
+    const out = new Map();
+    const list = (videoIds || []).map(Number).filter(Number.isInteger);
+    if (!list.length) return out;
+    const marks = list.map(() => '?').join(',');
+    for (const r of db.prepare(
+      `SELECT video_id, group_id FROM video_groups WHERE video_id IN (${marks})`,
+    ).all(...list)) {
+      if (!out.has(r.video_id)) out.set(r.video_id, []);
+      out.get(r.video_id).push(r.group_id);
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------------- 生命周期
 
   function close() {
@@ -777,8 +978,12 @@ function createDatabase(config, options = {}) {
     runMigrations, healPaths, ensureColumns,
     // videos
     getVideo, findByUrl, insertVideo, updateVideo, listVideos, facets,
+    listVideosAll,
     deleteVideo, countByStatus, countActive, listByStatus, listByStatuses,
     markStaleActiveAsPaused, findDuplicateFiles, dedupeByFile,
+    // 分组（库页）
+    listGroups, createGroup, updateGroup, deleteGroup,
+    addToGroup, removeFromGroup, groupIdsFor,
     // playlists
     upsertPlaylist, getPlaylistItems,
     // events

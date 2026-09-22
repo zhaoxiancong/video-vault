@@ -394,3 +394,204 @@ test('候选：listCandidates 的分页与 limit 生效', () => {
     assert.equal(ctx.repo.listCandidates({ limit: 4, offset: 8 }).rows.length, 2);
   } finally { ctx.cleanup(); }
 });
+
+// ---------------------------------------------------------------- 分组
+
+test('分组：建组、列表（含 0 条的组）、重复名字报错', () => {
+  const ctx = freshRepo();
+  try {
+    const g1 = ctx.repo.createGroup({ name: '待看', color: 'amber' });
+    assert.ok(g1.id > 0);
+    ctx.repo.createGroup({ name: '教程', color: 'blue' });
+
+    const list = ctx.repo.listGroups();
+    assert.equal(list.length, 2, '两个都要在');
+    assert.equal(list.find((g) => g.name === '教程').count, 0, '空分组也要出现且 count=0');
+
+    // Review Focus 2：只差空格或大小写的同名也算重名 ——
+    // 否则界面上会出现两个肉眼一样的组，用户分不清点哪个
+    assert.throws(() => ctx.repo.createGroup({ name: ' 待看 ' }), (e) => {
+      assert.equal(e.httpStatus, 409, '重名必须是 409，不能静默建两个');
+      return true;
+    });
+    assert.throws(() => ctx.repo.createGroup({ name: '待看' }), (e) => e.httpStatus === 409);
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：名字为空或超长要报错，且不说"已保存"', () => {
+  const ctx = freshRepo();
+  try {
+    assert.throws(() => ctx.repo.createGroup({ name: '   ' }), (e) => e.httpStatus === 400);
+    assert.throws(() => ctx.repo.createGroup({ name: 'x'.repeat(41) }), (e) => e.httpStatus === 400);
+    assert.equal(ctx.repo.listGroups().length, 0, '失败的创建不能留下记录');
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：多对多 —— 一个视频能同时在两个组里，count 正确', () => {
+  const ctx = freshRepo();
+  try {
+    const a = ctx.repo.insertVideo({ url: 'https://x/1', title: 'v1' });
+    const b = ctx.repo.insertVideo({ url: 'https://x/2', title: 'v2' });
+    const g1 = ctx.repo.createGroup({ name: '待看' });
+    const g2 = ctx.repo.createGroup({ name: '教程' });
+
+    assert.equal(ctx.repo.addToGroup([a.id, b.id], g1.id), 2);
+    assert.equal(ctx.repo.addToGroup([a.id], g2.id), 1);
+
+    const list = ctx.repo.listGroups();
+    assert.equal(list.find((g) => g.id === g1.id).count, 2);
+    assert.equal(list.find((g) => g.id === g2.id).count, 1);
+
+    const map = ctx.repo.groupIdsFor([a.id, b.id]);
+    assert.deepEqual(map.get(a.id).slice().sort(), [g1.id, g2.id].slice().sort(), 'v1 在两个组里');
+    assert.deepEqual(map.get(b.id), [g1.id]);
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：addToGroup 幂等 —— 重复加同一条不报错也不重复', () => {
+  const ctx = freshRepo();
+  try {
+    const v = ctx.repo.insertVideo({ url: 'https://x/1', title: 'v1' });
+    const g = ctx.repo.createGroup({ name: '待看' });
+    assert.equal(ctx.repo.addToGroup([v.id], g.id), 1);
+    assert.equal(ctx.repo.addToGroup([v.id], g.id), 0, '第二次应当 0 条新增');
+    assert.equal(ctx.repo.listGroups()[0].count, 1, '不能变成 2');
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：addToGroup 忽略不存在的视频 id 与不存在的分组', () => {
+  const ctx = freshRepo();
+  try {
+    const v = ctx.repo.insertVideo({ url: 'https://x/1', title: 'v1' });
+    const g = ctx.repo.createGroup({ name: '待看' });
+    assert.equal(ctx.repo.addToGroup([v.id, 999999], g.id), 1, '只加存在的那条');
+    assert.equal(ctx.repo.addToGroup([v.id], 999999), 0, '分组不存在时什么都不做');
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：removeFromGroup 只摘关系，视频记录还在', () => {
+  const ctx = freshRepo();
+  try {
+    const v = ctx.repo.insertVideo({ url: 'https://x/1', title: 'v1' });
+    const g = ctx.repo.createGroup({ name: '待看' });
+    ctx.repo.addToGroup([v.id], g.id);
+    assert.equal(ctx.repo.removeFromGroup([v.id], g.id), 1);
+    assert.equal(ctx.repo.listGroups()[0].count, 0);
+    assert.ok(ctx.repo.getVideo(v.id), '视频记录必须还在');
+    assert.equal(ctx.repo.removeFromGroup([v.id], g.id), 0, '再摘一次是 0');
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：改名与换色；改成别人的名字要 409；不存在返回 null', () => {
+  const ctx = freshRepo();
+  try {
+    const a = ctx.repo.createGroup({ name: '待看', color: 'amber' });
+    ctx.repo.createGroup({ name: '教程', color: 'blue' });
+
+    const renamed = ctx.repo.updateGroup(a.id, { name: '稍后看', color: 'green' });
+    assert.equal(renamed.name, '稍后看');
+    assert.equal(renamed.color, 'green');
+
+    assert.throws(() => ctx.repo.updateGroup(a.id, { name: '教程' }), (e) => e.httpStatus === 409,
+      '改成已存在的名字必须 409');
+    assert.equal(ctx.repo.updateGroup(999999, { name: 'x' }), null, '不存在返回 null');
+
+    // 只改颜色时名字不能被清掉
+    const colored = ctx.repo.updateGroup(a.id, { color: 'red' });
+    assert.equal(colored.name, '稍后看');
+    assert.equal(colored.color, 'red');
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：detach 只解散，purge 删记录但不动磁盘文件（Review Focus 6）', () => {
+  const ctx = freshRepo();
+  try {
+    const file = path.join(ctx.tmp, 'downloads', 'keepme.mp4');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'fake video bytes');
+
+    const v = ctx.repo.insertVideo({
+      url: 'https://x/1', title: 'v1', status: 'done', file_path: file,
+    });
+    const g1 = ctx.repo.createGroup({ name: '待看' });
+    const g2 = ctx.repo.createGroup({ name: '教程' });
+    ctx.repo.addToGroup([v.id], g1.id);
+
+    // detach：视频和文件都必须还在
+    const d1 = ctx.repo.deleteGroup(g1.id, { mode: 'detach' });
+    assert.equal(d1.mode, 'detach');
+    assert.equal(d1.removedVideos, 0);
+    assert.ok(ctx.repo.getVideo(v.id), 'detach 不能删视频记录');
+    assert.ok(fs.existsSync(file), 'detach 不能动磁盘文件');
+
+    // purge：删库记录，但**磁盘文件仍然在**（这条最容易做错，也最伤人）
+    ctx.repo.addToGroup([v.id], g2.id);
+    const d2 = ctx.repo.deleteGroup(g2.id, { mode: 'purge' });
+    assert.equal(d2.mode, 'purge');
+    assert.equal(d2.removedVideos, 1);
+    assert.equal(ctx.repo.getVideo(v.id), null, 'purge 要删掉库记录');
+    assert.ok(fs.existsSync(file), '⚠️ purge 绝不能删磁盘文件');
+    assert.equal(ctx.repo.listGroups().length, 0);
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：删除不存在的分组返回 null，不抛异常', () => {
+  const ctx = freshRepo();
+  try {
+    assert.equal(ctx.repo.deleteGroup(999999), null);
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：删视频时关系跟着级联清掉（不留悬空行）', () => {
+  const ctx = freshRepo();
+  try {
+    const v = ctx.repo.insertVideo({ url: 'https://x/1', title: 'v1' });
+    const g = ctx.repo.createGroup({ name: '待看' });
+    ctx.repo.addToGroup([v.id], g.id);
+    ctx.repo.deleteVideo(v.id);
+    assert.equal(ctx.repo.listGroups()[0].count, 0, '关系行应当被级联删除');
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：groupIdsFor 对空输入与不存在的 id 都安全', () => {
+  const ctx = freshRepo();
+  try {
+    assert.equal(ctx.repo.groupIdsFor([]).size, 0);
+    assert.equal(ctx.repo.groupIdsFor([999999]).size, 0);
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：listVideosAll 与 listVideos 用同一套筛选，只是不分页', () => {
+  const ctx = freshRepo();
+  try {
+    for (let i = 0; i < 5; i++) {
+      ctx.repo.insertVideo({
+        url: `https://x/${i}`, title: `t${i}`, site: i < 2 ? 'Youtube' : 'XVideos',
+      });
+    }
+    const paged = ctx.repo.listVideos({ site: 'Youtube', limit: 1 });
+    const all = ctx.repo.listVideosAll({ site: 'Youtube' });
+    assert.equal(paged.total, 2);
+    assert.equal(paged.rows.length, 1, '分页版只给 1 条');
+    assert.equal(all.length, 2, '全集版要给全部 2 条');
+    // 顺序必须一致 —— 两者共用同一段 ORDER BY，抽共享片段就是为了这个
+    assert.deepEqual(
+      all.map((r) => r.id),
+      ctx.repo.listVideos({ site: 'Youtube' }).rows.map((r) => r.id),
+      '两者的顺序必须一致（同一套 ORDER BY）',
+    );
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：listVideosAll 支持全部筛选维度（q/status/site/uploader/starred）', () => {
+  const ctx = freshRepo();
+  try {
+    ctx.repo.insertVideo({ url: 'https://x/1', title: 'alpha', site: 'Youtube', uploader: 'u1', status: 'done' });
+    ctx.repo.insertVideo({ url: 'https://x/2', title: 'beta', site: 'BiliBili', uploader: 'u2', status: 'failed' });
+    assert.equal(ctx.repo.listVideosAll({ q: 'alpha' }).length, 1);
+    assert.equal(ctx.repo.listVideosAll({ status: 'failed' }).length, 1);
+    assert.equal(ctx.repo.listVideosAll({ uploader: 'u1' }).length, 1);
+    assert.equal(ctx.repo.listVideosAll({ starred: true }).length, 0);
+    assert.equal(ctx.repo.listVideosAll({}).length, 2);
+  } finally { ctx.cleanup(); }
+});
