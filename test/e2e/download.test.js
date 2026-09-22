@@ -101,7 +101,7 @@ const skipReason = process.env.VAULT_SKIP_E2E === '1'
 test('真实下载：完整走通 下载 → 合并 → ffprobe 入库 → 网页播放（Range）', {
   skip: skipReason,
   timeout: DOWNLOAD_TIMEOUT + 60000,
-}, async () => {
+}, async (t) => {
   const s = await startApp();
   try {
     // ---- 1. 引擎可用性（先确认不是环境问题）
@@ -127,6 +127,31 @@ test('真实下载：完整走通 下载 → 合并 → ffprobe 入库 → 网�
 
     // ---- 3. 等它跑完
     const v = await waitForFinish(s.app, id);
+
+    /**
+     * 站点策略拦截 ≠ 代码坏了 —— 必须**跳过**而不是失败。
+     *
+     * 实测（2026-09-22）：YouTube 现在对匿名请求回
+     *   "Sign in to confirm you're not a bot. Use --cookies-from-browser ..."
+     * 于是这条测试在没配 Cookie 的机器上**必然红**。
+     *
+     * 常红的测试比没有测试更糟：它会训练人忽略红灯 —— 这次它就让一次无关的改动
+     * 看起来像"改坏了"，白查了一轮。项目对这类问题已经有过结论（第五轮）：
+     * **环境导致的"没测"和真正的"测过了"必须长得不一样**。
+     *
+     * 所以：识别出站点策略拦截就跳过，并把怎么办写进原因里。
+     * 想看它真的跑完 → 在「设置 → 登录态」里配一次 Cookie，或者用
+     * `--url` / `VAULT_E2E_URL` 换一个不需要登录的地址（比如能直连的直链 mp4）。
+     */
+    const blockedBySite = v.status === 'failed'
+      && /not a bot|cookies-from-browser|Sign in to confirm|HTTP Error 403|需要登录|登录态/i.test(v.error || '');
+    if (blockedBySite) {
+      t.skip(`目标站点要求登录态，下载被拦（不是代码问题）：${String(v.error).slice(0, 120)}\n`
+        + '    想看这条真跑完：在「设置 → 登录态」配一次 Cookie，'
+        + '或用 --url / VAULT_E2E_URL 换一个不需要登录的地址。');
+      return;
+    }
+
     assert.equal(v.status, 'done', `任务没成功：${v.error}`);
 
     // ---- 4. 文件真的在磁盘上，且 ffprobe 认它

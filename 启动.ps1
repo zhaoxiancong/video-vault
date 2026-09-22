@@ -1,15 +1,25 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    启动视频下载工具（可选：自动打开浏览器、指定端口）。
+    启动视频下载工具（可选：指定端口）。
+
+.DESCRIPTION
+    这个脚本必须保存为 **带 BOM 的 UTF-8**：PowerShell 5.1 读无 BOM 的 UTF-8 会按系统
+    ANSI（GBK）解析，中文注释与提示会变乱码，严重时把引号吃掉直接语法错误。
+    行尾用 CRLF，与 .cmd 保持一致。改完跑 `node tools\fix-launchers.js` 校验。
+
+    **浏览器由服务自己打开**（`--open`）。早期版本在这里轮询就绪状态再开浏览器，
+    那要求服务跑在后台 —— 而后台进程会在窗口关闭后继续活着，把"关窗即停"变成假话；
+    用后台作业（Start‑Job 那类）又依赖命名管道，受限环境里会失败。
+    所以现在：前台运行服务，服务自己开浏览器。
+
 .EXAMPLE
     .\启动.ps1
-    .\启动.ps1 -Port 8899 -NoBrowser
+    .\启动.ps1 -Port 8899
 #>
 [CmdletBinding()]
 param(
-    [int]$Port = 8787,
-    [switch]$NoBrowser
+    [int]$Port = 8787
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,28 +44,12 @@ if (-not (Test-Path $ytdlp)) {
 }
 
 $env:VAULT_PORT = "$Port"
-$url = "http://127.0.0.1:$Port"
 
-Write-Host ""
-Write-Host "  启动视频下载工具…" -ForegroundColor Cyan
-Write-Host "  地址：$url"
-Write-Host "  按 Ctrl+C 停止（未完成的任务会保留，下次可手动继续）"
-Write-Host ""
+# 横幅由 tools\launcher-banner.js 打印，和 启动.cmd 共用同一份文案 ——
+# 免得两处各写一份中文、然后慢慢不一致。
+& node (Join-Path $root 'tools\launcher-banner.js') banner
 
-if (-not $NoBrowser) {
-    Start-Job -ScriptBlock {
-        param($u)
-        for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Milliseconds 500
-            try {
-                $r = Invoke-WebRequest -Uri "$u/api/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-                if ($r.StatusCode -eq 200) { Start-Process $u; break }
-            } catch { }
-        }
-    } -ArgumentList $url | Out-Null
-}
-
-# 用绝对路径启动：命令行里带完整项目路径，工作区的 tools\kill-safe.js
+# 前台运行。绝对路径：命令行里带完整项目路径，工作区的 tools\kill-safe.js
 # 才能识别出"这个进程属于本项目"并安全清理。
-# 用相对路径时命令行只有 "node src/main.js"，清理工具无法判断归属，会保守拒绝。
-node $entry
+# --open 让服务就绪后自己打开浏览器（见上面 DESCRIPTION 里的理由）。
+& node $entry --open

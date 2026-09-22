@@ -150,6 +150,34 @@ function printBanner(app) {
   console.log('');
 }
 
+/**
+ * 打开系统默认浏览器。
+ *
+ * 为什么这件事由**服务自己做**，而不是交给启动脚本：
+ *   启动脚本要"等服务就绪再开浏览器"，就得轮询 —— 而轮询要么用后台作业
+ *   （依赖命名管道与子进程 IPC，受限环境会失败），要么把服务放到后台再前台起一次
+ *   （结果起了两次、第二次必然 EADDRINUSE），而且后台起的进程会**脱离窗口**，
+ *   "关掉窗口就停止工具"那句承诺就成了假的（实测确实成了假的）。
+ *
+ *   服务自己开浏览器则完全没有这些问题：进程生命周期天然绑在窗口上，
+ *   零轮询、零后台作业、零孤儿进程。
+ *
+ * 失败不抛：开不了浏览器不该影响服务本身。
+ */
+function openBrowser(url) {
+  const { spawn } = require('node:child_process');
+  try {
+    // windowsHide + detached + unref：给它自由身，服务退出后浏览器照常开着
+    const child = spawn('cmd', ['/c', 'start', '', url], {
+      detached: true, stdio: 'ignore', windowsHide: true,
+    });
+    child.unref();
+  } catch (e) {
+    console.log(`  （没能自动打开浏览器：${e.message}）`);
+    console.log(`   手动访问：${url}`);
+  }
+}
+
 /** 命令行入口 */
 async function main() {
   const app = createApp();
@@ -170,6 +198,12 @@ async function main() {
 
   await app.listen();
   printBanner(app);
+
+  // 双击启动脚本时会带上 --open，服务就绪后由自己打开界面。
+  // 直接 `node src/main.js` 不带这个参数 —— 不偷偷开浏览器，脚本化调用不受干扰。
+  if (process.argv.includes('--open')) {
+    openBrowser(`http://${app.config.host}:${app.config.port}`);
+  }
 }
 
 if (require.main === module) {

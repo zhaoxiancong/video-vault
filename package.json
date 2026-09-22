@@ -16,9 +16,10 @@
     "test:unit": "node test/run.js unit",
     "test:integration": "node test/run.js integration",
     "test:ui": "node test/ui/smoke.js",
-    "check": "node tools/lint-undefined.js && node tools/check-frontend.js && node tools/check-classes.js",
+    "check": "node tools/lint-undefined.js && node tools/check-frontend.js && node tools/check-classes.js && node tools/check-launchers.js",
     "shots": "node tools/screenshot.js",
-    "rebuild": "node tools/rebuild-library.js"
+    "rebuild": "node tools/rebuild-library.js",
+    "fix:launchers": "node tools/fix-launchers.js"
   },
   "keywords": [
     "yt-dlp",
