@@ -258,6 +258,79 @@ async function main() {
       console.log('  · 库里没有卡片，跳过「更多」面板截图');
     }
 
+    // ---- 库页分组：按站点分段 / 按分组分段 / 分组管理 / 多选
+    //
+    // 这几屏**必须有真实的分组数据才看得见**。空实例（库里一条都没有）跑这段
+    // 只会截到一张空列表，所以先看库里有没有东西再决定跑不跑。
+    const libCount = await evalJs(`document.querySelectorAll('#libGrid .card').length`);
+    if (libCount > 0) {
+      const setGroupBy = async (val) => {
+        await evalJs(`
+          (() => {
+            const s = document.getElementById('libGroupBy');
+            s.value = ${JSON.stringify(val)};
+            s.dispatchEvent(new Event('change'));
+            return true;
+          })()
+        `);
+        await sleep(1200);   // 分组要重新请求接口
+      };
+
+      await setGroupBy('site');
+      await shot('shot-library-group-site');
+
+      await setGroupBy('group');
+      await shot('shot-library-group-custom');
+
+      // 折叠：点第一段的标题
+      await evalJs(`(() => {
+        const h = document.querySelector('#libGrid .grp-head');
+        if (h) h.click();
+        return Boolean(h);
+      })()`);
+      await sleep(700);
+      await shot('shot-library-group-collapsed');
+
+      // 分组管理弹层（含 0 条的分组与颜色选择）
+      await setGroupBy('');
+      await evalJs(`document.getElementById('btnManageGroups').click()`);
+      await sleep(700);
+      await shot('shot-group-manager');
+      await evalJs(`document.getElementById('modal').hidden = true`);
+
+      // 多选：勾上开关 + 选两条，看批量条
+      await evalJs(`
+        (() => {
+          const m = document.getElementById('libMulti');
+          m.checked = true;
+          m.dispatchEvent(new Event('change'));
+          return true;
+        })()
+      `);
+      await sleep(700);
+      await evalJs(`
+        (() => {
+          const boxes = [...document.querySelectorAll('#libGrid .pick')].slice(0, 2);
+          for (const b of boxes) { b.checked = true; b.dispatchEvent(new Event('change')); }
+          return boxes.length;
+        })()
+      `);
+      await sleep(700);
+      await shot('shot-library-multi');
+      // 还原，免得影响后面的截图
+      await evalJs(`
+        (() => {
+          const m = document.getElementById('libMulti');
+          m.checked = false;
+          m.dispatchEvent(new Event('change'));
+          return true;
+        })()
+      `);
+      await sleep(500);
+    } else {
+      console.log('  · 库里没有卡片，跳过分组相关截图');
+    }
+
     // ---- 确认框
     await evalJs(`
       (async () => {
