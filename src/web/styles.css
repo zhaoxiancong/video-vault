@@ -1038,3 +1038,54 @@ select {
   font-variant-numeric: tabular-nums;
 }
 .bulk-pick { min-width: 132px; }
+
+/* ---- 分组管理弹层 ---- */
+
+.gm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.gm-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.gm-name { font-size: 13px; color: var(--text); }
+.gm-count {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.swatches { display: flex; gap: 7px; }
+
+/* 颜色选择块。⚠️ `.swatch` 与 `.c-*` 的 background 来自上面的颜色类，
+   这里只负责形状与选中态 —— 别把颜色写死在这里。 */
+.swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.swatch.is-on {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+.form-error {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--red);
+}
+.muted { color: var(--text-3); font-size: 13px; }

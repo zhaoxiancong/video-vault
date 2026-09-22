@@ -1106,3 +1106,142 @@ test('库页多选：分组模式也能勾选（勾选框在分组内容里）',
     assert.equal(hit, undefined, '没点批量按钮之前不该发请求');
   } finally { dom.restore(); }
 });
+
+// ---------------------------------------------------------------- 分组管理
+
+/** 两个分组（其中一个 0 条）+ 可用的增删改接口 */
+function manageResponses() {
+  return {
+    ...fakeResponses(),
+    'GET /api/groups': {
+      groups: [
+        { id: 1, name: '待看', color: 'amber', count: 3 },
+        { id: 2, name: '空的', color: 'blue', count: 0 },
+      ],
+    },
+    'POST /api/groups': { id: 3, name: '新建的', color: 'amber', count: 0 },
+    'PATCH /api/groups/1': { id: 1, name: '改名后', color: 'green', count: 3 },
+    'DELETE /api/groups/1': { mode: 'detach', removedVideos: 0 },
+  };
+}
+
+async function bootManage() {
+  const booted = await bootFrontend({ responses: manageResponses() });
+  globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+  await new Promise((r) => setTimeout(r, 50));
+  return booted;
+}
+
+test('分组管理：点「管理分组」列出所有分组，**含 0 条的**', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnManageGroups').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const rows = [...globalThis.document.querySelectorAll('#modal .gm-row')];
+    assert.equal(rows.length, 2, `两个分组都要列出来（含 0 条的），实际 ${rows.length}`);
+    const text = globalThis.document.getElementById('modal').textContent;
+    assert.match(text, /待看/);
+    assert.match(text, /空的/, '0 条的分组也要在列表里 —— 否则刚建完就"消失"了');
+    assert.match(text, /0 条/, '条数要显示');
+  } finally { dom.restore(); }
+});
+
+test('分组管理：删除时必须弹确认框，且默认选项是"只解散"', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnManageGroups').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 点第一行的「删除」
+    const del = [...globalThis.document.querySelectorAll('#modal .gm-row')][0]
+      .querySelectorAll('button').find((b) => b.textContent === '删除');
+    assert.ok(del, '每行要有删除按钮');
+    del.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const box = globalThis.document.querySelector('#modal .dialog');
+    const labels = [...box.querySelectorAll('.dialog-actions button')].map((b) => b.textContent);
+    assert.ok(labels.some((l) => /只解散/.test(l)), `要有"只解散"这个选项，实际：${labels.join(' | ')}`);
+    assert.ok(labels.some((l) => /库记录/.test(l)), '要有"删库记录"这个选项');
+
+    // ⚠️ 关键：purge 那个选项**必须写明磁盘文件保留** ——
+    // 它删的是库记录，文件仍在。只写"一起删除"会让用户以为文件也没了。
+    assert.ok(labels.some((l) => /磁盘文件保留/.test(l)),
+      `危险选项必须写明文件保留，实际：${labels.join(' | ')}`);
+
+    // 默认（primary）那一边必须是安全的 detach，不是 purge
+    const primary = box.querySelector('.dialog-actions .btn-primary');
+    assert.ok(primary, '应当有一个默认选中的选项');
+    assert.match(primary.textContent, /只解散/, '默认必须是"只解散"，不能默认删记录');
+
+    // 还没确认，所以不该发删除请求
+    assert.equal(dom.calls.filter((c) => c.method === 'DELETE').length, 0, '确认前不该删');
+  } finally { dom.restore(); }
+});
+
+test('分组管理：选「只解散」后发的请求带 mode=detach', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnManageGroups').click();
+    await new Promise((r) => setTimeout(r, 30));
+    [...globalThis.document.querySelectorAll('#modal .gm-row')][0]
+      .querySelectorAll('button').find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const keep = [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /只解散/.test(b.textContent));
+    keep.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const hit = dom.calls.find((c) => c.method === 'DELETE' && c.url.includes('/api/groups/1'));
+    assert.ok(hit, `要真的发删除请求。实际调用：${dom.calls.map((c) => c.method + ' ' + c.url.split('?')[0]).join(' | ')}`);
+    assert.match(hit.url, /mode=detach/, `默认必须是 detach，实际 ${hit.url}`);
+  } finally { dom.restore(); }
+});
+
+test('分组管理：新建分组会发 POST，并带上名字与颜色', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnNewGroup').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const nameBox = globalThis.document.getElementById('groupName');
+    assert.ok(nameBox, '新建弹层里要有名字输入框');
+    nameBox.value = '新建的';
+
+    // 换一个颜色
+    const blue = [...globalThis.document.querySelectorAll('#groupColors .swatch')]
+      .find((s) => s.dataset.color === 'blue');
+    assert.ok(blue, '颜色选择块要渲染出来');
+    blue.click();
+
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => b.textContent === '建立').click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('/api/groups'));
+    assert.ok(hit, '要发 POST /api/groups');
+    assert.equal(hit.body.name, '新建的');
+    assert.equal(hit.body.color, 'blue', '选的颜色要带上');
+  } finally { dom.restore(); }
+});
+
+test('分组管理：名字为空时不发请求，并在弹层里报错', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnNewGroup').click();
+    await new Promise((r) => setTimeout(r, 30));
+    globalThis.document.getElementById('groupName').value = '   ';
+
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => b.textContent === '建立').click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.equal(dom.calls.filter((c) => c.method === 'POST' && c.url.includes('/api/groups')).length, 0,
+      '空名字不该发请求');
+    const err = globalThis.document.querySelector('#modal .form-error');
+    assert.ok(err && !err.hidden, '要在弹层里显示错误，而不是静默什么也不做');
+    assert.match(err.textContent, /名字/);
+  } finally { dom.restore(); }
+});

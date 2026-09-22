@@ -104,6 +104,9 @@ export function initLibraryView({ onPlay }) {
     if (!head) return;
     toggleGroup(head.dataset.grp);
   });
+
+  $('#btnNewGroup').addEventListener('click', () => showGroupEditor(null));
+  $('#btnManageGroups').addEventListener('click', () => showGroupManager());
 }
 
 function setLayout(view) {
@@ -570,4 +573,149 @@ async function showMore(v, { onPlay, reload: reloadFn }) {
   ]));
   modal.hidden = false;
   modal.onclick = (e) => { if (e.target === modal) close(); };
+}
+
+// ---------------------------------------------------------------- 分组管理
+
+/**
+ * 可选的预设颜色。**只存 key 不存色值**（后端 `groups.color` 也是 key）——
+ * 这样以后调色板变了，旧数据仍然是合法 key，不会留下一个没人认识的 `#a1b2c3`。
+ */
+const GROUP_COLORS = ['amber', 'blue', 'green', 'purple', 'red'];
+
+/** 打开一个弹层（复用 #modal，与「更多」一致） */
+function openModal(build) {
+  const modal = $('#modal');
+  const close = () => { modal.hidden = true; };
+  replace(modal, build(close));
+  modal.hidden = false;
+  modal.onclick = (e) => { if (e.target === modal) close(); };
+}
+
+/**
+ * 新建 / 编辑一个分组。
+ * @param {object|null} g 传 null 是新建，传分组对象是编辑
+ */
+function showGroupEditor(g) {
+  const isNew = !g;
+  const nameBox = el('input', {
+    type: 'text', id: 'groupName', maxlength: '40',
+    placeholder: '比如：待看、教程、素材',
+  });
+  nameBox.value = g ? g.name : '';
+
+  let color = (g && g.color) || GROUP_COLORS[0];
+  const swatches = GROUP_COLORS.map((c) => {
+    const b = el('button', {
+      class: `swatch c-${c}${c === color ? ' is-on' : ''}`,
+      type: 'button', title: c, dataset: { color: c },
+    });
+    b.addEventListener('click', () => {
+      color = c;
+      // 只切高亮，不重建节点（免得输入框里的字被清掉）
+      $$('#groupColors .swatch').forEach((x) => x.classList.toggle('is-on', x.dataset.color === c));
+    });
+    return b;
+  });
+
+  const err = el('div', { class: 'form-error', hidden: true });
+
+  const save = async () => {
+    const name = nameBox.value.trim();
+    if (!name) {
+      err.textContent = '名字不能为空';
+      err.hidden = false;
+      return;
+    }
+    try {
+      if (isNew) await api('POST', '/api/groups', { name, color });
+      else await api('PATCH', `/api/groups/${g.id}`, { name, color });
+      toast(isNew ? `已建立分组「${name}」` : '已保存');
+      await loadGroups();
+      await reload({ reset: true });
+      $('#modal').hidden = true;
+    } catch (e) {
+      // 409 重名在这里会带上后端写好的中文说明，直接显示
+      err.textContent = formatError(e);
+      err.hidden = false;
+    }
+  };
+
+  openModal((close) => el('div', { class: 'dialog' }, [
+    el('h3', { text: isNew ? '新建分组' : `编辑「${g.name}」` }),
+    el('label', { class: 'field' }, [el('span', { text: '名字' }), nameBox]),
+    el('div', { class: 'field' }, [
+      el('span', { text: '颜色' }),
+      el('div', { class: 'swatches', id: 'groupColors' }, swatches),
+    ]),
+    err,
+    el('div', { class: 'dialog-actions' }, [
+      el('button', { class: 'btn', type: 'button', text: '取消', onclick: close }),
+      el('button', { class: 'btn btn-primary', type: 'button', text: isNew ? '建立' : '保存', onclick: save }),
+    ]),
+  ]));
+}
+
+/** 分组列表：改名 / 换色 / 删除（含 0 条的分组 —— 刚建的也要能看见） */
+function showGroupManager() {
+  const rows = (state.groups || []).map((g) => el('div', { class: 'gm-row', dataset: { gid: String(g.id) } }, [
+    el('span', { class: `grp-dot c-${g.color}` }),
+    el('span', { class: 'gm-name', text: g.name }),
+    el('span', { class: 'gm-count', text: `${g.count} 条` }),
+    el('span', { class: 'toolbar-spacer' }),
+    el('button', {
+      class: 'btn btn-sm', type: 'button', text: '编辑',
+      onclick: () => showGroupEditor(g),
+    }),
+    el('button', {
+      class: 'btn btn-sm btn-danger', type: 'button', text: '删除',
+      onclick: () => confirmDeleteGroup(g),
+    }),
+  ]));
+
+  openModal((close) => el('div', { class: 'dialog dialog-wide' }, [
+    el('h3', { text: '管理分组' }),
+    rows.length
+      ? el('div', { class: 'gm-list' }, rows)
+      : el('p', { class: 'muted', text: '还没有任何分组。点「＋ 新建分组」建一个。' }),
+    el('div', { class: 'dialog-actions' }, [
+      el('button', { class: 'btn btn-primary', type: 'button', text: '关闭', onclick: close }),
+    ]),
+  ]));
+}
+
+/**
+ * 删除分组前的确认（用户要求"弹框让我选"）。
+ *
+ * ⚠️ 两个选项的文案**必须写清 purge 不删磁盘文件** ——
+ * 后端那个 `purge` 删的是**库记录**，磁盘上的视频文件仍在。
+ * 只写"一起删除"会让用户以为文件也没了，而文件是他辛苦下的。
+ * 默认选中"只解散"（安全的那一边）。
+ */
+async function confirmDeleteGroup(g) {
+  const pick = await confirmDialog({
+    title: `删除分组「${g.name}」`,
+    body: `这个分组里有 ${g.count} 条视频。`,
+    actions: [
+      { label: '取消', value: null },
+      { label: '只解散分组，视频回到「未分组」', value: 'detach', primary: true },
+      { label: '删分组和里面的库记录（磁盘文件保留）', value: 'purge', tone: 'danger' },
+    ],
+  });
+  if (!pick) return;
+  try {
+    const r = await api('DELETE', `/api/groups/${g.id}?mode=${pick}`);
+    toast(pick === 'purge'
+      ? `已删除分组和 ${r.removedVideos} 条库记录（磁盘文件保留）`
+      : '已解散分组，视频回到「未分组」');
+    // 如果当前正在"只看"这个分组，清掉这个筛选，否则会看着一个不存在的分组
+    if (String(state.prefs.library.onlyGroup || '') === String(g.id)) {
+      savePrefs({ library: { onlyGroup: '' } });
+    }
+    await loadGroups();
+    await reload({ reset: true });
+    $('#modal').hidden = true;
+  } catch (err) {
+    toast(formatError(err), 'bad');
+  }
 }
