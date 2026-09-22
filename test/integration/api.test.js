@@ -613,3 +613,122 @@ test('慢爬取：超过等待窗口返回 202 + runId，候选随后仍会入�
     assert.equal(list.data.total, 2, '后台跑完的候选也要入库');
   } finally { await s.cleanup(); }
 });
+
+// ---------------------------------------------------------------- 库页分组
+
+/** 灌几条带站点的记录（站点要能区分开），返回它们的 id */
+async function seedSites(s, pairs) {
+  const ids = [];
+  for (const [url, site] of pairs) {
+    await s.call('POST', '/api/videos', { urls: url });
+    const lib = await s.call('GET', '/api/library');
+    const row = lib.data.rows.find((r) => r.url === url);
+    s.app.repo.updateVideo(row.id, { site, status: 'done' });
+    ids.push(row.id);
+  }
+  return ids;
+}
+
+test('分组接口：按站点分段，每段的 rows 数量必须等于 count（不是当前页条数）', async () => {
+  const s = await startApp();
+  try {
+    await seedSites(s, [
+      ['https://x/a1', 'Youtube'], ['https://x/a2', 'Youtube'],
+      ['https://x/b1', 'BiliBili'], ['https://x/c1', 'XVideos'], ['https://x/c2', 'XVideos'],
+    ]);
+
+    const r = await s.call('GET', '/api/library/grouped?by=site');
+    assert.equal(r.status, 200);
+    assert.equal(r.data.by, 'site');
+    assert.equal(r.data.total, 5);
+    assert.equal(r.data.truncated, false);
+    assert.equal(r.data.cap, 2000);
+
+    const names = r.data.groups.map((g) => g.name).sort();
+    assert.deepEqual(names, ['BiliBili', 'XVideos', 'Youtube'], '三个站点各一段');
+    assert.equal(r.data.groups.find((g) => g.name === 'Youtube').count, 2);
+    assert.equal(r.data.groups.find((g) => g.name === 'XVideos').count, 2);
+    assert.equal(r.data.groups.find((g) => g.name === 'BiliBili').count, 1);
+
+    // 这条咬住"只把当前页分了组"那种实现
+    for (const g of r.data.groups) {
+      assert.equal(g.rows.length, g.count, `${g.name} 的 rows 数量应当等于 count`);
+    }
+  } finally { await s.cleanup(); }
+});
+
+test('分组接口：Review Focus 1 —— 站点名大小写不同要归并成一段', async () => {
+  const s = await startApp();
+  try {
+    await seedSites(s, [
+      ['https://x/y1', 'Youtube'], ['https://x/y2', 'youtube'], ['https://x/y3', 'YOUTUBE'],
+    ]);
+    const r = await s.call('GET', '/api/library/grouped?by=site');
+    assert.equal(r.data.groups.length, 1,
+      `三种写法必须归并成一段，实际 ${JSON.stringify(r.data.groups.map((g) => g.name))}`);
+    assert.equal(r.data.groups[0].count, 3);
+    // 显示名取"第一次出现"的写法，而默认排序是 created_desc（最新的排最前），
+    // 所以这里**不能断言具体是哪个大小写** —— 那跟排序耦合，会变成脆测试。
+    // 断言"它是三种写法之一"就够了：归并成功才是这条测试要钉的东西。
+    assert.ok(['Youtube', 'youtube', 'YOUTUBE'].includes(r.data.groups[0].name),
+      `显示名应当是三种写法之一，实际 ${r.data.groups[0].name}`);
+  } finally { await s.cleanup(); }
+});
+
+test('分组接口：站点为空的记录归入「未标注站点」，不是消失', async () => {
+  const s = await startApp();
+  try {
+    await s.call('POST', '/api/videos', { urls: 'https://x/nosite' });
+    const r = await s.call('GET', '/api/library/grouped?by=site');
+    assert.equal(r.data.total, 1, '不能因为没站点就把它丢了');
+    assert.equal(r.data.groups.length, 1);
+    assert.match(r.data.groups[0].name, /未标注/);
+  } finally { await s.cleanup(); }
+});
+
+// ⚠️ 「未分组要有自己的段」与「一个视频同时在两个组里」这两条测试**移到 Task 3 一起做** ——
+// 它们都要先调 POST /api/videos/group-action 才能造出场景，而那个接口是 Task 3 的产物。
+// 放在这里会让 Task 2 停在"有 2 条红着"，看不出是自己坏了还是依赖没到。
+
+test('分组接口：空分组也返回且 count=0（Review Focus 4）', async () => {
+  const s = await startApp();
+  try {
+    await s.call('POST', '/api/groups', { name: '空的' });
+    const r = await s.call('GET', '/api/library/grouped?by=group');
+    const empty = r.data.groups.find((g) => g.name === '空的');
+    assert.ok(empty, '刚建的空分组必须出现，否则用户以为没建成');
+    assert.equal(empty.count, 0);
+    assert.deepEqual(empty.rows, []);
+  } finally { await s.cleanup(); }
+});
+
+test('分组接口：筛选先于分组 —— 筛了站点就只出现一段（这是正确行为）', async () => {
+  const s = await startApp();
+  try {
+    await seedSites(s, [['https://x/a', 'Youtube'], ['https://x/b', 'BiliBili']]);
+    const r = await s.call('GET', '/api/library/grouped?by=site&site=Youtube');
+    assert.equal(r.data.groups.length, 1);
+    assert.equal(r.data.groups[0].name, 'Youtube');
+    assert.equal(r.data.total, 1);
+  } finally { await s.cleanup(); }
+});
+
+test('分组接口：by 不合法时 400，且 hint 要列出可用值', async () => {
+  const s = await startApp();
+  try {
+    const r = await s.call('GET', '/api/library/grouped?by=nonsense');
+    assert.equal(r.status, 400);
+    assert.match(r.data.hint || '', /site/);
+  } finally { await s.cleanup(); }
+});
+
+test('分组接口：by 缺省时按站点分段（不是报错）', async () => {
+  const s = await startApp();
+  try {
+    await seedSites(s, [['https://x/a', 'Youtube']]);
+    const r = await s.call('GET', '/api/library/grouped');
+    assert.equal(r.status, 200);
+    assert.equal(r.data.by, 'site');
+    assert.equal(r.data.groups.length, 1);
+  } finally { await s.cleanup(); }
+});
