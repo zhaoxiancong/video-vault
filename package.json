@@ -19,7 +19,9 @@
     "check": "node tools/lint-undefined.js && node tools/check-frontend.js && node tools/check-classes.js && node tools/check-launchers.js",
     "shots": "node tools/screenshot.js",
     "rebuild": "node tools/rebuild-library.js",
-    "fix:launchers": "node tools/fix-launchers.js"
+    "fix:launchers": "node tools/fix-launchers.js",
+    "icon": "node tools/make-icon.js",
+    "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/make-desktop-shortcut.ps1"
   },
   "keywords": [
     "yt-dlp",
