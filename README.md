@@ -138,6 +138,30 @@ JavaScript 页面（服务端抓到的 HTML 里没有链接时会明说"这种�
 - 按 状态 / 站点 / 作者 筛选，按 加入时间 / 标题 / 体积 / 时长 排序，仅看收藏
 - **网页内直接播放**（支持拖动进度条 —— 服务端实现了 HTTP Range）
 - 收藏、备注、复制文件路径、删除记录（可选是否连文件一起删）
+- **分组**：按站点自动分段 + 自建分组（多对多），可折叠；多选后批量入组 / 批量收藏
+
+### 库页分组（自动分段 + 自定义分组）
+
+列表长起来之后，平铺一长条就不好找了。所以「我的库」有两套组织方式：
+
+| 做法 | 怎么用 |
+|---|---|
+| **按站点分段** | 工具栏「展示 → 按站点分段」。BiliBili / Youtube / XVideos… 各一段，点标题折叠 |
+| **自定义分组** | 「＋ 新建分组」建一个（可配色），勾选若干条 → 批量条上选「加入分组」 |
+
+要点：
+
+- 一个视频**可以同时属于多个分组**（多对多，像标签）；不属于任何分组的就是「未分组」
+- 分段标题后面的条数是**全量条数**，不是"当前页有多少"
+- 分组模式下会一次把筛选结果全拿回来再分段（不再分页），但**封顶 2000 条** ——
+  超了会在统计那里明说"只分组了前 2000 条，建议先筛选"
+- 折叠状态记在浏览器本地，**不写进库**（那是显示偏好，不是数据）
+- 勾选多条之后可以**批量加入分组**、**批量收藏/取消收藏**；换筛选条件会清空勾选
+
+> ⚠️ **删除分组时有两个选项，看清楚再点**：
+> 「只解散分组」只是把归类取消，视频回到「未分组」；
+> 「删分组和里面的库记录」会**删掉库里那些视频的记录** ——
+> **磁盘上的视频文件仍然保留**（想要连文件一起删，用列表里每条的「删除记录」）。
 
 ---
 
@@ -217,7 +241,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 20260920_视频下载工具/
 ├── 启动.cmd / 启动.ps1      ← 双击这个
 ├── src/                     ← 程序本体
-├── test/                    ← 测试（219 项）
+├── test/                    ← 测试（270 项）
 ├── tools/                   ← 辅助脚本（引擎安装、重建库、静态检查）
 ├── downloads/               ← 视频都在这（可在设置里改）
 
@@ -244,7 +268,7 @@ const scheduler = createScheduler(config, { repo, downloader, media, settings })
 ## 5. 测试与静态检查
 
 ```powershell
-npm test                    # 全部 219 项
+npm test                    # 全部 270 项
 node test/run.js unit       # 只跑单元测试
 node test/run.js integration # 只跑集成测试
 node test/run.js --verbose  # 带完整输出
@@ -268,10 +292,10 @@ node test/e2e/download.test.js # 真实下载端到端（走网络流量）
 | 单元 | `test/unit/crawl-parse.test.js` | 22 | 无（对着真实 HTML 夹具解析） |
 | 单元 | `test/unit/crawler.test.js` | 19 | 无（yt-dlp 与 fetch 都是注入的假的） |
 | 单元 | `test/unit/discovery.test.js` | 10 | 无（syncWaitMs 可注入，不等真 20 秒） |
-| 集成 | `test/integration/database.test.js` | 23 | 临时目录里的独立数据库 |
-| 集成 | `test/integration/api.test.js` | 32 | 临时目录里的独立实例，走真实 HTTP |
+| 集成 | `test/integration/database.test.js` | 36 | 临时目录里的独立数据库 |
+| 集成 | `test/integration/api.test.js` | 52 | 临时目录里的独立实例，走真实 HTTP |
 | 集成 | `test/integration/path-healing.test.js` | 6 | 两个临时目录，模拟项目被搬走 |
-| 集成 | `test/integration/frontend-dom.test.mjs` | 26 | **DOM 垫片**，不需要浏览器 |
+| 集成 | `test/integration/frontend-dom.test.mjs` | 45 | **DOM 垫片**，不需要浏览器 |
 | 端到端 | `test/e2e/download.test.js` | 2 | **联网**，真的下载一个视频 |
 
 **所有测试都在临时目录里跑**，不碰你的真实库。这是重构带来的直接好处。
@@ -653,7 +677,7 @@ test('转码绝不动原始文件', { skip: noFFmpeg }, async (t) => { ... });
 
 ```powershell
 npm start                          # 启动服务
-npm test                           # 全部测试（219 项）
+npm test                           # 全部测试（270 项）
 npm run check                      # 静态检查
 npm run setup                      # 只下载引擎
 
