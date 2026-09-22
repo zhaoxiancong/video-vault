@@ -1002,6 +1002,59 @@ select {
 
 .grp-body { padding-left: 2px; }
 
+/**
+ * 分组标题上的"全选本组"勾选框。推到最右边（标题其余部分是折叠开关）。
+ *
+ * 完全自绘：`appearance: none` 之后**不能再用 `accent-color`**
+ * （原生外观下它优先于 background，未勾选时会画成一块亮白方块 ——
+ * 在深色标题条上非常扎眼，截图里一眼就能看出来）。
+ * 所以这里把对勾与横杠都用伪元素画出来，颜色自己控制。
+ */
+.grp-pick {
+  margin-left: auto;
+  width: 17px;
+  height: 17px;
+  flex: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  position: relative;
+  vertical-align: middle;
+}
+.grp-pick:hover { border-color: var(--amber-dim); }
+
+/* 勾选：画一个对勾 */
+.grp-pick:checked::after {
+  content: '✓';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--amber);
+}
+
+/* 部分选中：一根横杠（与工具栏那个全选框的 indeterminate 语义一致） */
+.grp-pick:indeterminate::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--amber);
+  border-radius: 1px;
+}
+
+.grp-pick:disabled { cursor: default; opacity: .4; }
+
 .grp-empty {
   padding: 14px 12px;
   font-size: 12.5px;

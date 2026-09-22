@@ -72,6 +72,12 @@ export function initLibraryView({ onPlay }) {
     renderLibrary();
   });
 
+  // 工具栏的「全选」：作用于本屏看得见的那些（含分组模式下的所有分组）
+  $('#libPickAll').addEventListener('change', () => {
+    if ($('#libPickAll').checked) selectAllVisible();
+    else clearVisible();
+  });
+
   $('#libOnlyGroup').addEventListener('change', () => {
     savePrefs({ library: { onlyGroup: $('#libOnlyGroup').value } });
     clearPicked();
@@ -244,6 +250,74 @@ function clearPicked() {
 }
 
 /**
+ * 当前列表里**看得见**的那些视频（平铺模式是全部行，分组模式是各组里的行）。
+ *
+ * 「全选」作用于它 —— 不是"筛选下的全部"：那个要单独点批量条上的
+ * 「选中全部 N 条」，因为它可能包含还没加载出来的几百条。
+ */
+function visibleRows() {
+  const grouped = state.library.grouped;
+  if (state.prefs.library.by && grouped) return grouped.groups.flatMap((g) => g.rows);
+  return state.library.rows || [];
+}
+
+function selectAllVisible() {
+  for (const v of visibleRows()) picked.add(v.id);
+  renderLibrary();
+}
+
+function clearVisible() {
+  for (const v of visibleRows()) picked.delete(v.id);
+  renderLibrary();
+}
+
+/** 「选中筛选下的全部」——要问后端（可能包含还没加载出来的） */
+async function selectAllFiltered() {
+  const lib = state.prefs.library;
+  const qs = new URLSearchParams({
+    q: lib.q || '', status: lib.status || '', site: lib.site || '',
+    uploader: lib.uploader || '', sort: lib.sort || 'created_desc',
+  });
+  if (lib.starred) qs.set('starred', '1');
+  if (lib.onlyGroup) qs.set('groupId', String(lib.onlyGroup));
+  try {
+    const r = await api('GET', `/api/library/ids?${qs}`);
+    for (const id of r.ids) picked.add(id);
+    renderLibrary();
+    toast(r.truncated
+      ? `已选中前 ${r.count} 条（筛选下共 ${r.total} 条，超出上限只选了前 ${r.cap} 条）`
+      : `已选中 ${r.count} 条`, r.truncated ? 'warn' : '');
+  } catch (err) {
+    toast(formatError(err), 'bad');
+  }
+}
+
+/**
+ * 按"库里实际存在的行"重建勾选框状态。
+ *
+ * ⚠️ 必须**重建视觉**，不能只改旧的节点。`renderLibrary()` 会 `replace()` 重建 DOM，
+ *    所以每次重绘后勾选框都是全新的、`checked` 全丢 —— 改旧节点等于白改。
+ *    这也是"全选之后看不见任何勾"那类 bug 的来源。
+ */
+function syncPickBoxes() {
+  const multi = $('#libMulti').checked;
+  $('#libPickAllWrap').hidden = !multi;
+  if (!multi) return;
+
+  for (const box of $$('.pick')) {
+    box.checked = picked.has(Number(box.dataset.pick));
+  }
+
+  const rows = visibleRows();
+  const allOn = rows.length > 0 && rows.every((v) => picked.has(v.id));
+  const someOn = rows.some((v) => picked.has(v.id));
+  const all = $('#libPickAll');
+  all.checked = allOn;
+  // 部分选中给"不确定"态，否则空勾选框会让人以为什么都没选
+  all.indeterminate = someOn && !allOn;
+}
+
+/**
  * 当前视图该用哪个容器（网格还是列表）。
  * **只在这里判断**，别在别处再判断一次 —— 那正是白屏 bug 的来源。
  */
@@ -348,9 +422,39 @@ function buildGroup(g, view) {
       g.color ? el('span', { class: `grp-dot c-${g.color}` }) : null,
       el('span', { class: 'grp-name', text: g.name }),
       el('span', { class: 'grp-count', text: String(g.count) }),
+      // 分组级全选：只作用于这一组。藏在标题最右边，不影响其它地方的点击（折叠）
+      groupPickBox(g),
     ]),
     body,
   ]);
+}
+
+/**
+ * 分组标题上的"全选本组"勾选框（多选模式下才出现）。
+ *
+ * 点它要**阻止冒泡** —— `grp-head` 整条是折叠开关，不拦住的话
+ * "全选这一组"会顺手把这一组折叠起来，很烦。
+ */
+function groupPickBox(g) {
+  if (!$('#libMulti').checked) return null;
+  const ids = g.rows.map((v) => v.id);
+  const box = el('input', {
+    type: 'checkbox',
+    class: 'grp-pick',
+    dataset: { grppick: g.key },
+    'aria-label': `选中「${g.name}」这一组的全部 ${g.count} 条`,
+    title: g.count ? `选中这一组的 ${g.count} 条` : '这一组是空的',
+  });
+  box.disabled = ids.length === 0;
+  box.checked = ids.length > 0 && ids.every((id) => picked.has(id));
+  box.indeterminate = !box.checked && ids.some((id) => picked.has(id));
+  box.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (box.checked) for (const id of ids) picked.add(id);
+    else for (const id of ids) picked.delete(id);
+    renderLibrary();
+  });
+  return box;
 }
 
 /** 多选模式下的勾选框；不在多选模式时返回 null（调用方直接放进 children，null 会被忽略） */
@@ -375,12 +479,21 @@ function pickBox(v) {
  * 用 textContent 建节点（不拼 innerHTML），跟这个文件其它地方一致。
  */
 function renderBulkBar() {
+  // 勾选框状态必须跟着每次重绘重建（DOM 被 replace 了，旧节点的 checked 全丢）
+  syncPickBoxes();
+
   const bar = $('#libBulkBar');
-  if (!$('#libMulti').checked || !picked.size) {
+  if (!$('#libMulti').checked) {
     bar.hidden = true;
     clear(bar);
     return;
   }
+
+  const visible = visibleRows();
+  const filteredTotal = state.library.grouped
+    ? (state.library.grouped.total || 0)
+    : (state.library.total || 0);
+  const allVisibleOn = visible.length > 0 && visible.every((v) => picked.has(v.id));
 
   const opts = [el('option', { value: '', text: '加入分组…' })];
   for (const g of state.groups || []) {
@@ -389,9 +502,36 @@ function renderBulkBar() {
   const sel = el('select', { class: 'bulk-pick' }, opts);
   sel.addEventListener('change', () => { if (sel.value) bulkGroupAdd(Number(sel.value)); });
 
+  /**
+   * 两个"全选"的区别要写在按钮文案里，否则用户分不清：
+   *   · 「全选本屏」= 列表里**看得见**的这些
+   *   · 「选中全部 N 条」= 当前**筛选下**的全部（含还没加载出来的）
+   * 只有筛选下的条数比可见条数多时才显示后一个 —— 否则两个按钮做的事一样，
+   * 多一个按钮只会让人犹豫。
+   */
+  const selectButtons = [];
+  if (!allVisibleOn) {
+    selectButtons.push(el('button', {
+      class: 'btn btn-sm', type: 'button',
+      text: `全选本屏 ${visible.length}`,
+      title: `只选中当前列表里看得见的 ${visible.length} 条`,
+      onclick: () => selectAllVisible(),
+    }));
+  }
+  if (filteredTotal > visible.length) {
+    selectButtons.push(el('button', {
+      class: 'btn btn-sm', type: 'button',
+      // 文案要短：长了会把这行挤到换行，版面上很难看。两者的区别靠 title 说清。
+      text: `全选全部 ${filteredTotal}`,
+      title: `选中当前筛选下的全部 ${filteredTotal} 条（包括还没加载出来的）`,
+      onclick: () => selectAllFiltered(),
+    }));
+  }
+
   replace(bar, [
-    el('span', { class: 'bulk-count', text: `已选 ${picked.size} 条` }),
+    el('span', { class: 'bulk-count', text: picked.size ? `已选 ${picked.size} 条` : '未选中' }),
     sel,
+    ...selectButtons,
     el('button', { class: 'btn btn-sm', type: 'button', text: '收藏', onclick: () => bulkStar('star') }),
     el('button', { class: 'btn btn-sm', type: 'button', text: '取消收藏', onclick: () => bulkStar('unstar') }),
     el('button', {

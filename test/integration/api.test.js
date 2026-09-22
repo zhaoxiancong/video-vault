@@ -1043,3 +1043,67 @@ test('分组上限：正好 2000 条时不该算截断（边界）', async () =>
     assert.equal(r.data.truncated, false, '正好到上限不算截断 —— 差一条就报截断会误导用户');
   } finally { await s.cleanup(); }
 });
+
+// ---------------------------------------------------------------- 「选中筛选下的全部」
+
+test('取筛选下的全部 id：只回 id，且跟着筛选走', async () => {
+  const s = await startApp();
+  try {
+    await seedSites(s, [
+      ['https://x/1', 'Youtube'], ['https://x/2', 'Youtube'], ['https://x/3', 'BiliBili'],
+    ]);
+
+    const all = await s.call('GET', '/api/library/ids');
+    assert.equal(all.status, 200);
+    assert.equal(all.data.count, 3);
+    assert.equal(all.data.total, 3);
+    assert.equal(all.data.truncated, false);
+    assert.equal(all.data.ids.length, 3);
+    // 只回 id：不该把整行（含 description/notes 这些大字段）搬过来
+    assert.ok(all.data.ids.every((x) => typeof x === 'number'), 'ids 必须是数字数组');
+    assert.equal(all.data.rows, undefined, '不该回整行');
+
+    const onlyYt = await s.call('GET', '/api/library/ids?site=Youtube');
+    assert.equal(onlyYt.data.count, 2, '筛选要生效');
+    assert.equal(onlyYt.data.total, 2);
+  } finally { await s.cleanup(); }
+});
+
+test('取筛选下的全部 id：也认 groupId（和列表的口径一致）', async () => {
+  const s = await startApp();
+  try {
+    const ids = await seedSites(s, [
+      ['https://x/1', 'Youtube'], ['https://x/2', 'Youtube'], ['https://x/3', 'BiliBili'],
+    ]);
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+    await s.call('POST', '/api/videos/group-action', { ids: [ids[0]], add: [g.data.id] });
+
+    const r = await s.call('GET', `/api/library/ids?groupId=${g.data.id}`);
+    assert.equal(r.data.count, 1);
+    assert.deepEqual(r.data.ids, [ids[0]]);
+  } finally { await s.cleanup(); }
+});
+
+test('取筛选下的全部 id：超过上限要截断并如实上报', async () => {
+  const s = await startApp();
+  try {
+    for (let i = 0; i < 2001; i++) {
+      s.app.repo.insertVideo({
+        url: `https://cap.example/v/${i}`, title: `cap ${i}`, status: 'done',
+      });
+    }
+    const r = await s.call('GET', '/api/library/ids');
+    assert.equal(r.data.count, 2000, '最多给 2000 个 id');
+    assert.equal(r.data.total, 2001, 'total 仍是真实总数');
+    assert.equal(r.data.cap, 2000);
+    assert.equal(r.data.truncated, true, '超了必须如实上报，界面才能提示');
+  } finally { await s.cleanup(); }
+});
+
+test('取筛选下的全部 id：groupId 非法时同样 400（与列表口径一致）', async () => {
+  const s = await startApp();
+  try {
+    const r = await s.call('GET', '/api/library/ids?groupId=abc');
+    assert.equal(r.status, 400);
+  } finally { await s.cleanup(); }
+});

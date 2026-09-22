@@ -222,6 +222,11 @@
       <label class="field field-check compact">
         <input type="checkbox" id="libMulti"><span>多选</span>
       </label>
+      <!-- 全选：只在多选模式下显示，作用于"当前列表里看得见的这些"。
+           要选"筛选下的全部（含没加载的）"，用下面批量条里的那个按钮。 -->
+      <label class="field field-check compact" id="libPickAllWrap" hidden>
+        <input type="checkbox" id="libPickAll"><span>全选</span>
+      </label>
       <!-- 只显示某一个自定义分组（快捷筛选），与上面的"展示维度"互不冲突 -->
       <select id="libOnlyGroup" hidden><option value="">只看：全部分组</option></select>
       <button class="btn btn-sm" id="btnNewGroup" type="button">＋ 新建分组</button>

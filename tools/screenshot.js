@@ -317,16 +317,44 @@ async function main() {
       `);
       await sleep(700);
       await shot('shot-library-multi');
+
+      // 全选：勾上工具栏的「全选」，看批量条上的两个全选按钮与已选计数
+      await evalJs(`
+        (() => {
+          const all = document.getElementById('libPickAll');
+          all.checked = true;
+          all.dispatchEvent(new Event('change'));
+          return true;
+        })()
+      `);
+      await sleep(700);
+      await shot('shot-library-select-all');
+
+      // 分组级的全选：切到按站点分段，看每个分段标题上的勾选框
+      await evalJs(`
+        (() => {
+          const s = document.getElementById('libGroupBy');
+          s.value = 'site';
+          s.dispatchEvent(new Event('change'));
+          return true;
+        })()
+      `);
+      await sleep(1300);
+      await shot('shot-library-group-select-all');
+
       // 还原，免得影响后面的截图
       await evalJs(`
         (() => {
+          const s = document.getElementById('libGroupBy');
+          s.value = '';
+          s.dispatchEvent(new Event('change'));
           const m = document.getElementById('libMulti');
           m.checked = false;
           m.dispatchEvent(new Event('change'));
           return true;
         })()
       `);
-      await sleep(500);
+      await sleep(700);
     } else {
       console.log('  · 库里没有卡片，跳过分组相关截图');
     }

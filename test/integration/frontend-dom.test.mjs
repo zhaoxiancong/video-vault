@@ -1021,8 +1021,10 @@ function multiResponses() {
     ...fakeResponses(),
     'GET /api/library': { total: 2, rows: [row(1, 'a'), row(2, 'b')] },
     'GET /api/groups': { groups: [{ id: 9, name: '待看', color: 'amber', count: 0 }] },
-    'POST /api/videos/bulk-action': (req) => ({ affected: (req.params && 2) || 2 }),
+    'POST /api/videos/bulk-action': () => ({ affected: 2 }),
     'POST /api/videos/group-action': { added: 2, removed: 0, affected: 2, errors: [] },
+    // 「选中筛选下全部」用的接口
+    'GET /api/library/ids': { ids: [1, 2], total: 2, count: 2, cap: 2000, truncated: false },
   };
 }
 
@@ -1047,13 +1049,22 @@ async function tick(n) {
   await new Promise((r) => setTimeout(r, 20));
 }
 
-test('库页多选：勾上多选后，每张卡片出现勾选框', async () => {
+test('库页多选：勾上多选后，每张卡片出现勾选框，批量条也随之常驻', async () => {
   const { dom } = await bootMulti();
   try {
     assert.equal(globalThis.document.querySelectorAll('#libGrid .pick').length, 2,
       '两条记录要有两个勾选框');
-    // 没勾任何东西时，批量条不出现
-    assert.equal(globalThis.document.getElementById('libBulkBar').hidden, true);
+
+    /**
+     * ⚠️ 批量条**在多选模式下常驻**（不是"有选中才出现"）。
+     *
+     * 这是刻意的改动：批量条上现在挂着「全选本屏 / 选中筛选下全部 N 条」两个按钮，
+     * 而"一个都还没选"正是最需要它们的时候。若仍按"有选中才显示"，
+     * 用户就永远看不到全选入口 —— 一个只在选中之后才出现的全选按钮没有意义。
+     */
+    const bar = globalThis.document.getElementById('libBulkBar');
+    assert.equal(bar.hidden, false, '多选模式下批量条应当常驻（全选按钮在上面）');
+    assert.match(bar.textContent, /未选中/, `一个没选时应当显示"未选中"，实际：${bar.textContent}`);
   } finally { dom.restore(); }
 });
 
@@ -1118,17 +1129,21 @@ test('库页多选：加入分组会带上选中的 id 与目标分组', async (
   } finally { dom.restore(); }
 });
 
-test('库页多选：「取消选择」清空批量条', async () => {
+test('库页多选：「取消选择」清空已选（批量条仍在，因为多选还开着）', async () => {
   const { dom } = await bootMulti();
   try {
     await tick(0);
     const btn = [...globalThis.document.querySelectorAll('#libBulkBar button')]
       .find((b) => b.textContent === '取消选择');
-    assert.ok(btn);
+    assert.ok(btn, `批量条里应当有「取消选择」，实际：${globalThis.document.getElementById('libBulkBar').textContent}`);
     btn.click();
     await new Promise((r) => setTimeout(r, 40));
-    assert.equal(globalThis.document.getElementById('libBulkBar').hidden, true,
-      '取消选择后批量条应当收起来');
+
+    const bar = globalThis.document.getElementById('libBulkBar');
+    // 多选还开着 → 批量条不收起；但计数要回到"未选中"，勾选框要全部清掉
+    assert.match(bar.textContent, /未选中/, `应当回到"未选中"，实际：${bar.textContent}`);
+    const boxes = [...globalThis.document.querySelectorAll('#libGrid .pick')];
+    assert.ok(boxes.every((b) => b.checked === false), '所有勾选框都要清掉');
   } finally { dom.restore(); }
 });
 
@@ -1144,8 +1159,11 @@ test('库页多选：换筛选条件会清空多选（避免"选中的东西看�
     star.dispatchEvent(new globalThis.Event('change'));
     await new Promise((r) => setTimeout(r, 60));
 
-    assert.equal(globalThis.document.getElementById('libBulkBar').hidden, true,
+    // 批量条本身还在（多选没关），但计数必须回到"未选中"
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /未选中/,
       '换了筛选就不该还留着上次的选中状态');
+    const boxes = [...globalThis.document.querySelectorAll('#libGrid .pick')];
+    assert.ok(boxes.every((b) => b.checked === false), '勾选框也要清掉');
   } finally { dom.restore(); }
 });
 
@@ -1447,5 +1465,203 @@ test('分组 + 列表视图：先分组再点「列表」也要能看见（评�
     assert.ok(visible.textContent.includes('Youtube'),
       `点完「列表」之后必须还能看见分段，实际文本：「${visible.textContent}」`);
     assert.ok(list.querySelectorAll('.lrow').length > 0, '分段里应当是行');
+  } finally { dom.restore(); }
+});
+
+// ---------------------------------------------------------------- 全选（三个层级）
+
+test('全选 ①：工具栏的「全选」选中本屏全部，再点一次取消', async () => {
+  const { dom } = await bootMulti();
+  try {
+    const wrap = globalThis.document.getElementById('libPickAllWrap');
+    assert.equal(wrap.hidden, false, '多选模式下「全选」应当可见');
+
+    const all = globalThis.document.getElementById('libPickAll');
+    all.checked = true;
+    all.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /已选 2 条/,
+      '两条都要被选中');
+    const boxes = [...globalThis.document.querySelectorAll('#libGrid .pick')];
+    assert.ok(boxes.every((b) => b.checked === true), '勾选框的视觉也要跟着选中');
+
+    // 再点一次 = 全不选
+    all.checked = false;
+    all.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 40));
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /未选中/);
+    assert.ok([...globalThis.document.querySelectorAll('#libGrid .pick')].every((b) => !b.checked),
+      '全部取消勾选');
+  } finally { dom.restore(); }
+});
+
+test('全选 ①：手动勾满之后，工具栏那个「全选」要反映为已勾选', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    await tick(1);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(globalThis.document.getElementById('libPickAll').checked, true,
+      '全都选中了，全选框就该是勾上的');
+    assert.equal(globalThis.document.getElementById('libPickAll').indeterminate, false);
+  } finally { dom.restore(); }
+});
+
+test('全选 ①：只选了一部分时，全选框要显示"不确定"态', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    await new Promise((r) => setTimeout(r, 30));
+    const all = globalThis.document.getElementById('libPickAll');
+    assert.equal(all.checked, false);
+    assert.equal(all.indeterminate, true,
+      '部分选中要给不确定态，否则空勾选框会让人以为什么都没选');
+  } finally { dom.restore(); }
+});
+
+test('全选 ②：「全选全部 N 条」会问后端并全选（含未加载的）', async () => {
+  const { dom } = await bootFrontend({
+    responses: {
+      ...multiResponses(),
+      // 模拟"筛到 5 条，但这一屏只加载了 2 条"
+      'GET /api/library': { total: 5, rows: [
+        { id: 1, url: 'https://x/1', title: 'a', status: 'done', created_at: '2026-09-22 10:00', file_path: 'D:\\1.mp4', starred: false },
+        { id: 2, url: 'https://x/2', title: 'b', status: 'done', created_at: '2026-09-22 10:00', file_path: 'D:\\2.mp4', starred: false },
+      ] },
+      'GET /api/library/ids': { ids: [1, 2, 3, 4, 5], total: 5, count: 5, cap: 2000, truncated: false },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 50));
+    const m = globalThis.document.getElementById('libMulti');
+    m.checked = true;
+    m.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 30));
+
+    const bar = globalThis.document.getElementById('libBulkBar');
+    const btn = [...bar.querySelectorAll('button')].find((b) => /全选全部/.test(b.textContent));
+    assert.ok(btn, `应当有「全选全部」按钮（可见 2 条 < 筛选 5 条）。实际：${bar.textContent}`);
+    assert.match(btn.textContent, /全选全部 5/, '按钮上要写明筛选下的总数');
+    // 两个按钮的区别靠 title 说清（文案短是为了不把这行挤到换行）
+    assert.match(btn.title, /包括还没加载出来的/, 'title 要说明它含未加载的');
+
+    btn.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const hit = dom.calls.find((c) => c.url.includes('/api/library/ids'));
+    assert.ok(hit, `要问后端要 id 列表。实际调用：${dom.calls.map((c) => c.url.split('?')[0]).join(' | ')}`);
+    // 要带上当前筛选，否则"选中筛选下全部"会变成"选中库里全部"
+    assert.match(hit.url, /q=/, 'ids 请求要带上筛选参数（q）');
+    assert.match(hit.url, /status=/, 'ids 请求要带上筛选参数（status）');
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /已选 5 条/,
+      '包括没加载出来的那 3 条也要选中');
+  } finally { dom.restore(); }
+});
+
+test('全选 ②：可见条数 == 筛选条数时，不显示那个按钮（两个按钮做的事一样就别给）', async () => {
+  const { dom } = await bootMulti();
+  try {
+    const bar = globalThis.document.getElementById('libBulkBar');
+    const btn = [...bar.querySelectorAll('button')].find((b) => /全选全部/.test(b.textContent));
+    assert.equal(btn, undefined,
+      `可见 2 条、筛选也 2 条时不该出现这个按钮。实际：${bar.textContent}`);
+    // 但「全选本屏」要在
+    assert.ok([...bar.querySelectorAll('button')].some((b) => /全选本屏/.test(b.textContent)),
+      '「全选本屏」必须一直有');
+  } finally { dom.restore(); }
+});
+
+test('全选 ③：分组标题上的勾选框只选中**这一组**', async () => {
+  const { dom } = await bootFrontend({
+    responses: {
+      ...groupedResponses(),
+      'GET /api/groups': { groups: [] },
+      'GET /api/library/ids': { ids: [1, 2, 3], total: 3, count: 3, cap: 2000, truncated: false },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 40));
+    const m = globalThis.document.getElementById('libMulti');
+    m.checked = true;
+    m.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 20));
+
+    await chooseGroupBy('site');
+
+    const boxes = [...globalThis.document.querySelectorAll('#libGrid .grp-pick')];
+    assert.equal(boxes.length, 2, `每段标题上要有一个勾选框，实际 ${boxes.length}`);
+    // 第一段是 Youtube（2 条），第二段是 BiliBili（1 条）
+    assert.match(globalThis.document.querySelectorAll('#libGrid .grp-name')[0].textContent, /Youtube/);
+
+    boxes[0].checked = true;
+    boxes[0].click();      // click 会触发我们挂的监听
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /已选 2 条/,
+      '只该选中第一段的 2 条，不是全部 3 条');
+    assert.equal(boxes[1].checked, false, '第二段的勾选框不该被带上');
+  } finally { dom.restore(); }
+});
+
+test('全选 ③：点分组勾选框不该顺手把这一组折叠（冒泡要拦住）', async () => {
+  /**
+   * ⚠️ 用**这一条专属的 key**，不要用 'Youtube'。
+   *    `prefs.library.collapsed` 是跨测试泄漏的模块状态（垫片只重置 DOM 与
+   *    localStorage，不重置模块），别的用例折叠过 'Youtube' 的话，
+   *    这里的"点前/点后"基线就带着那个 true，折叠与否根本对比不出来 ——
+   *    这个测试因此假绿过一轮（反证没咬住）。
+   */
+  const MK = 'OnlyForThisTest';
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/groups': { groups: [] },
+      'GET /api/library/ids': { ids: [1, 2, 3], total: 3, count: 3, cap: 2000, truncated: false },
+      'GET /api/library/grouped': (req) => ({
+        by: req.params.get('by') || 'site', total: 3, shown: 3, truncated: false, cap: 2000,
+        groups: [
+          { key: MK, id: null, name: MK, color: null, count: 2, rows: [
+            { id: 1, url: 'https://x/1', title: 'a', status: 'done', created_at: '2026-09-22 10:00', file_path: 'D:\\1.mp4', starred: false },
+            { id: 2, url: 'https://x/2', title: 'b', status: 'done', created_at: '2026-09-22 10:00', file_path: 'D:\\2.mp4', starred: false },
+          ] },
+          { key: `${MK}-2`, id: null, name: `${MK}-2`, color: null, count: 1, rows: [
+            { id: 3, url: 'https://x/3', title: 'c', status: 'done', created_at: '2026-09-22 10:00', file_path: 'D:\\3.mp4', starred: false },
+          ] },
+        ],
+      }),
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 40));
+    const m = globalThis.document.getElementById('libMulti');
+    m.checked = true;
+    m.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 20));
+    await chooseGroupBy('site');
+
+    const hiddenOf = (key) => {
+      const grp = [...globalThis.document.querySelectorAll('#libGrid .grp')]
+        .find((x) => x.querySelector('.grp-head').dataset.grp === key);
+      return grp.querySelector('.grp-body').hidden;
+    };
+
+    const before = hiddenOf(MK);
+    assert.equal(before, false, `这一组起点应当是展开的（专属 key 不会被别的用例折叠过）`);
+
+    const box = [...globalThis.document.querySelectorAll('#libGrid .grp-pick')]
+      .find((b) => b.dataset.grppick === MK);
+    assert.ok(box, '这一组标题上应当有勾选框');
+    box.checked = true;
+    box.click();                 // 修好垫片后，click() 会真的冒泡到 document
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.equal(hiddenOf(MK), false,
+      'grp-head 整条是折叠开关，勾选框必须阻止冒泡 —— 否则一点全选就把这组折起来');
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /已选 2 条/,
+      '同时选中还是生效的');
   } finally { dom.restore(); }
 });

@@ -118,6 +118,37 @@ function register(router, ctx) {
     return json(res, 200, repo.facets());
   });
 
+  /**
+   * 「选中筛选下的全部」——只回 id，不回整行。
+   *
+   * 为什么要单独一个接口（而不是在列表响应里带一个 ids 数组）：
+   *   · 只有点"全选"的那一刻才需要它，每次列表请求都带上纯属浪费；
+   *   · 整行里带着 description/notes 这些大字段，而这里只需要 id；
+   *   · `total` 与 `count` 可能不等（见下面的封顶），分开表达更清楚。
+   *
+   * ⚠️ 同样封顶 GROUP_CAP（2000）—— 不给"一次选中一万条"的口子。
+   *    返回 `truncated` 让界面能如实告诉用户"只选中了前 2000 条"。
+   */
+  router.get('/api/library/ids', (req, res, params, url) => {
+    const sp = url.searchParams;
+    const sortRaw = sp.get('sort') || 'created_desc';
+    const filters = {
+      q: sp.get('q') || '',
+      status: sp.get('status') || '',
+      site: sp.get('site') || '',
+      uploader: sp.get('uploader') || '',
+      starred: sp.get('starred') === '1',
+      groupId: parseGroupId(sp.get('groupId')),
+      sort: SORTS.includes(sortRaw) ? sortRaw : 'created_desc',
+    };
+    const total = repo.listVideos({ ...filters, limit: 1, offset: 0 }).total;
+    const rows = repo.listVideosAll(filters);
+    const ids = rows.slice(0, GROUP_CAP).map((v) => v.id);
+    return json(res, 200, {
+      ids, total, count: ids.length, cap: GROUP_CAP, truncated: rows.length > GROUP_CAP,
+    });
+  });
+
   // ---------------------------------------------------------------- 分组后的库
 
   /**

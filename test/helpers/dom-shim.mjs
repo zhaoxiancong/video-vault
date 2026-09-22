@@ -163,6 +163,16 @@ export class FakeElement extends FakeNode {
   get value() { return 'value' in this._attrs ? this._attrs.value : ''; }
   set value(v) { this._attrs.value = String(v); }
 
+  /**
+   * `title` 也要反射到属性 —— 与 `value`/`checked`/`hidden` 同一类。
+   *
+   * `el('button', { title: '说明' })` 走的是 `setAttribute`，值落在 `_attrs` 里；
+   * 而 `btn.title` 在真实 DOM 里读得到（属性反射），垫片里读不到就会得到
+   * "按钮没写 title"的假结论。
+   */
+  get title() { return 'title' in this._attrs ? this._attrs.title : ''; }
+  set title(v) { this._attrs.title = String(v); }
+
   get checked() { return this.hasAttribute('checked'); }
   set checked(v) {
     if (v) this._attrs.checked = '';
@@ -294,25 +304,64 @@ export class FakeElement extends FakeNode {
    * （比如整个 document 上监听 [data-action]），不冒泡就测不到。
    */
   dispatchEvent(event) {
-    const e = { type: event.type, target: event.target || this, ...event };
+    /**
+     * ⚠️ 展开顺序要紧：`...event` 必须**放在前面**，我们自己的字段在后面覆盖它。
+     *
+     * 反过来写过一次，后果很隐蔽：`{ type, target, ...event }` 里，
+     * `event.bubbles` 是**事件自己的**属性（真实 `Event` 默认 `false`），
+     * 于是 `click()` 里传的 `bubbles: true` 被**静默覆盖成 false** ——
+     * 事件在元素自己身上就停了，永远到不了 document。
+     *
+     * 表现是：一条"点 A 不该触发 A 祖先上的处理器"的测试**永远通过**
+     * （因为祖先压根收不到事件），反证怎么改都不变红。
+     */
+    const bubbles = event.bubbles === true;
+    const e = {
+      ...event,
+      type: event.type,
+      target: event.target || this,
+      bubbles,
+    };
     e.currentTarget = this;
     e.preventDefault = () => { e.defaultPrevented = true; };
     e.stopPropagation = () => { e._stopped = true; };
 
-    let node = this;
-    while (node) {
+    /**
+     * ⚠️ 冒泡路径要在**派发前一次性算好**，不能边走边读 `_parent`。
+     *
+     * 这是真实 DOM 的语义：事件路径在 `dispatchEvent` 时就固定了，
+     * 所以处理器**把节点从文档里摘掉**（本项目大量这么干 —— 每次点击都会
+     * `replace()` 重绘列表），事件**仍然会送达原来的祖先**。
+     *
+     * 边走边读的写法在这里会漏掉委托处理器：勾选框自己的监听器一重绘，
+     * 节点的 `_parent` 链就断了，事件再也走不到 document 上的委托 ——
+     * 表现是一条"点 A 不该触发 A 祖先上的处理器"的测试**永远通过**，
+     * 因为祖先压根收不到事件（反证怎么改都不变红，这次就是这么被坑的）。
+     */
+    const path0 = [];
+    for (let n = this; n; n = n._parent) path0.push(n);
+    const path = bubbles ? path0 : [this];
+
+    for (const node of path) {
       const set = node._listeners.get(e.type);
       if (set) {
         e.currentTarget = node;
         for (const fn of [...set]) fn.call(node, e);
       }
       if (e._stopped) break;
-      node = node._parent;
     }
     return !e.defaultPrevented;
   }
-  /** 便捷方法：真的"点"一下 */
-  click() { return this.dispatchEvent({ type: 'click' }); }
+
+  /**
+   * 便捷方法：真的"点"一下。
+   *
+   * 真实 DOM 里 `.click()` 派发的 click 事件**是冒泡的**，dispatched 到祖先上 ——
+   * 这个项目大量用事件委托（整个 document 上监听 `[data-lib]`、`[data-grp]`），
+   * 所以这里必须 `bubbles: true`，否则"点一下"在垫片里走不到委托处理器，
+   * 而这正是踩过的坑：一条"点分组勾选框不该折叠"的测试因此**假绿**。
+   */
+  click() { return this.dispatchEvent({ type: 'click', bubbles: true }); }
 
   // ---- 查询
   _match(sel) {
