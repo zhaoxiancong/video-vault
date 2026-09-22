@@ -902,8 +902,7 @@ select {
   max-width: 400px;
   animation: fade .18s ease;
 }
-.toast.ok   { border-left-color: var(--green); }
-.toast.bad  { border-left-color: var(--red); }
+.toast.ok   { border-left-color: var(--green); }.toast.bad  { border-left-color: var(--red); }
 
 /* 滚动条 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -919,3 +918,123 @@ select {
   .probe-card { flex-direction: column; }
   .probe-thumb { width: 100%; }
 }
+
+/* ============================================================================
+   库页分组
+   ----------------------------------------------------------------------------
+   一个分组段 = 可折叠的标题条 + 内容区。标题条整条可点，所以要有
+   pointer 与 user-select:none（连点两下不会选中文字）。
+   ============================================================================ */
+
+.grp { margin-bottom: 22px; }
+
+.grp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: background .12s ease, border-color .12s ease;
+}
+.grp-head:hover { background: var(--panel-2); border-color: var(--text-3); }
+
+/* 折叠箭头。固定宽度，免得展开/收起时标题横向跳动 */
+.grp-caret {
+  width: 12px;
+  font-size: 10px;
+  color: var(--text-3);
+  flex: none;
+}
+
+/* 自定义分组的颜色点（8px 圆点）。站点分组没有颜色，不画点 */
+.grp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-3);
+}
+
+/**
+ * 分组的可选颜色 —— **后端 color 字段只允许这几个 key**。
+ *
+ * ⚠️ 这几个类名不能删：`tools/check-classes.js` 对 `c-` 前缀是放行的
+ *    （颜色 key 从后端来，静态求不出值），样式表里这五个就是那道闸门。
+ *    要加颜色，前后端一起加（后端只存 key，不存色值）。
+ */
+.c-amber  { background: var(--amber); }
+.c-blue   { background: var(--blue); }
+.c-green  { background: var(--green); }
+.c-purple { background: var(--purple); }
+.c-red    { background: var(--red); }
+
+.grp-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.grp-count {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.grp-body { padding-left: 2px; }
+
+.grp-empty {
+  padding: 14px 12px;
+  font-size: 12.5px;
+  color: var(--text-3);
+  background: var(--bg-2);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+}
+
+/* ---- 多选 ---- */
+
+/* 卡片左上角的勾选框：盖在封面上，给个底色免得跟画面糊在一起 */
+.pick {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--amber);
+  cursor: pointer;
+}
+
+/* 列表视图里的勾选框：不压在缩略图上，单独占一格 */
+.pick-wrap {
+  display: flex;
+  align-items: center;
+  padding-right: 4px;
+  flex: none;
+}
+.pick-wrap .pick { position: static; }
+
+.bulkbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  margin-bottom: 14px;
+  background: var(--amber-glow);
+  border: 1px solid var(--amber-dim);
+  border-radius: 8px;
+}
+.bulk-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+}
+.bulk-pick { min-width: 132px; }

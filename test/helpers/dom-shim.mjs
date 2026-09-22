@@ -148,6 +148,24 @@ export class FakeElement extends FakeNode {
   get type() { return this._attrs.type || ''; }
   set type(v) { this._attrs.type = String(v); }
 
+  /**
+   * `hidden` 必须是**访问器**，不能只是普通属性。
+   *
+   * 真实 DOM 里 `el.hidden = true` 和 `el.setAttribute('hidden','')` 是同一件事，
+   * 但垫片里两者曾是分开的：`el()` 会转成属性，而**手写 `.hidden = true` 只写了个
+   * JS 属性**，`_attrs` 里没有 → `hasAttribute('hidden')` 为假 →
+   * `querySelectorAll('.grp-body[hidden]')` 永远匹配不到。
+   *
+   * 这个坑的表现是"代码明明把元素藏了，测试却说没藏" —— 又一类
+   * **垫片不够真导致的假失败**（本项目已经为这类问题吃过好几次亏）。
+   * 现在两者的真相都在 `_attrs` 上，怎么写都一致。
+   */
+  get hidden() { return this.hasAttribute('hidden'); }
+  set hidden(v) {
+    if (v) this._attrs.hidden = '';
+    else delete this._attrs.hidden;
+  }
+
   setAttribute(k, v) { this._attrs[k] = String(v); }
   getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; }
   hasAttribute(k) { return k in this._attrs; }
@@ -252,6 +270,30 @@ export class FakeElement extends FakeNode {
     // 去掉伪类（垫片不实现）
     const s = sel.split(':')[0].trim();
     if (!s) return false;
+
+    /**
+     * ⚠️ 「组合选择器」必须**先于** `.类名` 判断，否则永远匹配不到。
+     *
+     * 踩过的坑：`_match('.grp-body[hidden]')` 先命中 `s.startsWith('.')` 分支，
+     * 于是它拿整个字符串 `.grp-body[hidden]` 去当类名查 —— 当然查不到，
+     * 而且**不报错、只是静默返回 false**。表现是"代码明明把元素藏了，
+     * 测试却说没藏"，而 `el.hidden` 读出来是对的，非常难查。
+     *
+     * 现在 `.类名[属性]` 与 `#id[属性]` 先在这里处理，两种写法都支持
+     * （`[hidden]` 这种无值属性和 `[data-x="1"]` 这种有值属性都行）。
+     */
+    const combo = s.match(/^([.#][\w-]+)((?:\[[\w-]+\])+)$/);
+    if (combo) {
+      const base = combo[1].startsWith('.')
+        ? this.classList.contains(combo[1].slice(1))
+        : this.id === combo[1].slice(1);
+      if (!base) return false;
+      return [...combo[2].matchAll(/\[([\w-]+)(?:=["']?([^"'\]]*)["']?)?\]/g)]
+        .every(([, name, val]) => (val === undefined
+          ? this.hasAttribute(name)
+          : this.getAttribute(name) === val));
+    }
+
     if (s.startsWith('#')) return this.id === s.slice(1);
     if (s.startsWith('.')) return this.classList.contains(s.slice(1));
     if (s.startsWith('[')) {
@@ -268,17 +310,14 @@ export class FakeElement extends FakeNode {
         ? this.classList.contains(tm[2].slice(1))
         : this.id === tm[2].slice(1);
     }
-    // 形如 ".tab[data-view=x]" 的组合
-    const cm = s.match(/^([.#][\w-]+)(\[[^\]]+\])$/);
+    // 形如 "div[data-view=x]" 的组合
+    const cm = s.match(/^([a-zA-Z][\w-]*)(\[[^\]]+\])$/);
     if (cm) {
-      const base = cm[1].startsWith('.')
-        ? this.classList.contains(cm[1].slice(1))
-        : this.id === cm[1].slice(1);
+      if (this.tagName !== cm[1].toUpperCase()) return false;
       const am = cm[2].match(/^\[([\w-]+)(?:=["']?([^"'\]]*)["']?)?\]$/);
-      const attrOk = am
+      return am
         ? (am[2] === undefined ? this.hasAttribute(am[1]) : this.getAttribute(am[1]) === am[2])
         : false;
-      return base && attrOk;
     }
     return false;
   }
@@ -539,7 +578,20 @@ export function installDom({ html = '', responses = {}, webRoot } = {}) {
     const hit = responses[`${method} ${url}`]
       ?? responses[`${method} ${bare}`]
       ?? responses[`* ${bare}`];
-    const body = hit === undefined ? {} : hit;
+    /**
+     * 响应值可以是**函数**：`(req) => body`，req 带 `{method, url, bare, params}`。
+     *
+     * 为什么需要这个：有些响应**必须跟着请求走**，不能写死。
+     * 例如分组接口要回显 `by=site|group` —— 写死的话，前端拿到的维度与它请求的
+     * 对不上就会走错渲染分支（表现为"选了 group 却按 site 渲染"），
+     * 而那种失败看起来像产品 bug，其实只是假响应撒了谎。
+     */
+    let body;
+    if (typeof hit === 'function') {
+      body = hit({ method, url: String(url), bare, params: new URLSearchParams(String(url).split('?')[1] || '') });
+    } else {
+      body = hit === undefined ? {} : hit;
+    }
     return {
       ok: true,
       status: 200,

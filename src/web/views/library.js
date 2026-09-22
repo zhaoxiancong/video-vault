@@ -1,8 +1,13 @@
 /**
- * 「我的库」页：搜索、筛选、网格/列表两种视图、播放入口。
+ * 「我的库」页：搜索、筛选、网格/列表两种视图、分组展示、多选批量操作、播放入口。
  *
- * 筛选条件 persist 到 localStorage。理由很简单：用户筛到"某个 UP 主的、
+ * 筛选与展示偏好 persist 到 localStorage。理由很简单：用户筛到"某个 UP 主的、
  * 只看收藏"，刷新一下全归零，会很想打人。
+ *
+ * ⚠️ 两种"分组"要分清，别混：
+ *   · **展示维度**（`prefs.library.by`）：`''` / `'site'` / `'group'` —— 决定列表**怎么分段**
+ *   · **快捷筛选**（`prefs.library.onlyGroup`）：只看**某一个**自定义分组
+ *   它们互不冲突（可以"按站点分段"同时"只看：待看"）。
  */
 
 import { api, formatError } from '../api.js';
@@ -15,6 +20,12 @@ import { toast, confirmDialog } from '../ui.js';
 
 const PAGE = 60;
 
+/**
+ * 多选状态。**只在内存里**，换筛选/换分组维度就清空 ——
+ * 否则会出现"选中的东西在当前视图里看不见了"，那种状态最容易误操作。
+ */
+const picked = new Set();
+
 export function initLibraryView({ onPlay }) {
   const lib = state.prefs.library;
 
@@ -23,11 +34,14 @@ export function initLibraryView({ onPlay }) {
   $('#libStatus').value = lib.status || '';
   $('#libSort').value = lib.sort || 'created_desc';
   $('#libStarred').checked = Boolean(lib.starred);
+  $('#libGroupBy').value = lib.by || '';
+  $('#libMulti').checked = Boolean(lib.multi);
   setLayout(lib.view || 'grid');
 
   // 搜索防抖：别每敲一个字打一次接口
   $('#libSearch').addEventListener('input', debounce(() => {
     savePrefs({ library: { q: $('#libSearch').value } });
+    clearPicked();
     reload({ reset: true });
   }, 300));
 
@@ -35,11 +49,32 @@ export function initLibraryView({ onPlay }) {
     ['#libUploader', 'uploader'], ['#libSort', 'sort']]) {
     $(sel).addEventListener('change', () => {
       savePrefs({ library: { [key]: $(sel).value } });
+      clearPicked();
       reload({ reset: true });
     });
   }
   $('#libStarred').addEventListener('change', () => {
     savePrefs({ library: { starred: $('#libStarred').checked } });
+    clearPicked();
+    reload({ reset: true });
+  });
+
+  // 展示维度：切换后重新分组，所以必须先清掉多选
+  $('#libGroupBy').addEventListener('change', () => {
+    savePrefs({ library: { by: $('#libGroupBy').value } });
+    clearPicked();
+    reload({ reset: true });
+  });
+
+  $('#libMulti').addEventListener('change', () => {
+    savePrefs({ library: { multi: $('#libMulti').checked } });
+    clearPicked();
+    renderLibrary();
+  });
+
+  $('#libOnlyGroup').addEventListener('change', () => {
+    savePrefs({ library: { onlyGroup: $('#libOnlyGroup').value } });
+    clearPicked();
     reload({ reset: true });
   });
 
@@ -62,6 +97,13 @@ export function initLibraryView({ onPlay }) {
     if (!card) return;
     handleAction(btn.dataset.lib, Number(card.dataset.id), { onPlay, reload });
   });
+
+  // 分组标题折叠也走委托（分组是动态渲染的，不能逐个挂监听）
+  document.addEventListener('click', (e) => {
+    const head = e.target.closest('[data-grp]');
+    if (!head) return;
+    toggleGroup(head.dataset.grp);
+  });
 }
 
 function setLayout(view) {
@@ -80,22 +122,35 @@ function setLayout(view) {
 export async function reload({ reset = true } = {}) {
   const lib = state.prefs.library;
   const offset = reset ? 0 : state.library.rows.length;
-  const qs = new URLSearchParams({
+  const base = {
     q: lib.q || '', status: lib.status || '', site: lib.site || '',
     uploader: lib.uploader || '', sort: lib.sort || 'created_desc',
-    limit: String(PAGE), offset: String(offset),
-  });
-  if (lib.starred) qs.set('starred', '1');
+  };
 
   try {
-    const data = await api('GET', `/api/library?${qs}`);
-    state.library = reset
-      ? data
-      : { total: data.total, rows: [...state.library.rows, ...data.rows] };
+    if (lib.by) {
+      /**
+       * 分组模式：**走服务端分组、忽略分页**。
+       * 分组名后的条数必须是全量条数 —— 前端分页只拿得到当前页，
+       * 自己归并出来的数字只能是"这一页里有多少条"，那是错的。
+       */
+      const qs = new URLSearchParams({ ...base, by: lib.by });
+      if (lib.starred) qs.set('starred', '1');
+      const data = await api('GET', `/api/library/grouped?${qs}`);
+      state.library = { grouped: data, rows: [], total: data.total };
+    } else {
+      const qs = new URLSearchParams({ ...base, limit: String(PAGE), offset: String(offset) });
+      if (lib.starred) qs.set('starred', '1');
+      const data = await api('GET', `/api/library?${qs}`);
+      state.library = reset
+        ? { ...data, grouped: null }
+        : { total: data.total, rows: [...state.library.rows, ...data.rows], grouped: null };
+    }
     renderLibrary();
 
     // 顺手刷一下筛选项（新下载的站点/作者要出现在下拉里）
     if (!state.facets || reset) await loadFacets();
+    if (reset || !state.groups) await loadGroups();
   } catch (err) {
     toast(formatError(err), 'bad');
   }
@@ -109,6 +164,27 @@ async function loadFacets() {
   } catch { /* 筛选项拿不到不影响主流程 */ }
 }
 
+/**
+ * 自定义分组清单（下拉要用，**含 0 条的** —— 刚建的空分组如果"消失"，
+ * 用户会以为没建成）。
+ */
+export async function loadGroups() {
+  try {
+    state.groups = (await api('GET', '/api/groups')).groups || [];
+  } catch {
+    state.groups = [];
+  }
+  const sel = $('#libOnlyGroup');
+  const opts = [el('option', { value: '', text: '只看：全部分组' })];
+  for (const g of state.groups) {
+    opts.push(el('option', { value: String(g.id), text: `只看：${g.name}（${g.count}）` }));
+  }
+  replace(sel, opts);
+  sel.value = state.prefs.library.onlyGroup || '';
+  // 一个自定义分组都没有时这一项没意义，藏起来（但"＋新建"入口要留着）
+  sel.hidden = state.groups.length === 0;
+}
+
 function fillSelect(sel, rows, current, allLabel) {
   const node = $(sel);
   const opts = [el('option', { value: '', text: allLabel })];
@@ -119,12 +195,55 @@ function fillSelect(sel, rows, current, allLabel) {
   node.value = current || '';
 }
 
+// ---------------------------------------------------------------- 折叠状态
+
+/**
+ * 哪些分组是收起的。存 localStorage（`prefs.library.collapsed`）——
+ * 这是**显示偏好，不是数据**，不该写进库。
+ */
+function collapsedMap() {
+  const lib = state.prefs.library;
+  if (!lib.collapsed || typeof lib.collapsed !== 'object') lib.collapsed = {};
+  return lib.collapsed;
+}
+
+function toggleGroup(key) {
+  const map = collapsedMap();
+  if (map[key]) delete map[key]; else map[key] = true;
+  savePrefs({ library: { collapsed: map } });
+  renderLibrary();
+}
+
+// ---------------------------------------------------------------- 多选
+
+function clearPicked() {
+  picked.clear();
+}
+
 export function renderLibrary() {
-  const { rows, total } = state.library;
+  const lib = state.prefs.library;
   const grid = $('#libGrid');
   const list = $('#libList');
   const empty = $('#libEmpty');
 
+  // ---- 分组模式：服务端已经分好了，这里只负责画
+  if (lib.by && state.library.grouped) {
+    const g = state.library.grouped;
+    $('#libStat').textContent = g.truncated
+      ? `共 ${g.total} 条 · 只分组了前 ${g.cap} 条`
+      : `共 ${g.total} 条 · ${g.groups.length} 个分组`;
+    // 已经全量拿回来了，不该再给"加载更多"
+    $('#loadMoreWrap').hidden = true;
+    empty.hidden = g.groups.length > 0;
+    replace(grid, g.groups.map((grp) => buildGroup(grp, lib.view || 'grid')));
+    replace(list, []);
+    setLayout(lib.view || 'grid');
+    renderBulkBar();
+    return;
+  }
+
+  // ---- 平铺模式
+  const { rows, total } = state.library;
   $('#libStat').textContent = total ? `共 ${total} 条，显示 ${rows.length} 条` : '';
 
   if (!rows.length) {
@@ -132,6 +251,7 @@ export function renderLibrary() {
     clear(grid);
     clear(list);
     $('#loadMoreWrap').hidden = true;
+    renderBulkBar();
     return;
   }
   empty.hidden = true;
@@ -139,7 +259,108 @@ export function renderLibrary() {
   replace(grid, rows.map((v) => buildCard(v)));
   replace(list, rows.map((v) => buildRow(v)));
   $('#loadMoreWrap').hidden = rows.length >= total;
-  setLayout(state.prefs.library.view || 'grid');
+  setLayout(lib.view || 'grid');
+  renderBulkBar();
+}
+
+/** 一个分组段：可折叠的标题 + 内容 */
+function buildGroup(g, view) {
+  const collapsed = Boolean(collapsedMap()[g.key]);
+
+  const body = el('div', { class: 'grp-body', hidden: collapsed });
+  if (!g.rows.length) {
+    body.append(el('div', { class: 'grp-empty', text: '这个分组还是空的' }));
+  } else if (view === 'list') {
+    for (const row of g.rows) body.append(buildRow(row));
+  } else {
+    const inner = el('div', { class: 'grid' });
+    for (const row of g.rows) inner.append(buildCard(row));
+    body.append(inner);
+  }
+
+  return el('div', { class: 'grp' }, [
+    el('div', { class: 'grp-head', dataset: { grp: g.key } }, [
+      el('span', { class: 'grp-caret', text: collapsed ? '▶' : '▼' }),
+      g.color ? el('span', { class: `grp-dot c-${g.color}` }) : null,
+      el('span', { class: 'grp-name', text: g.name }),
+      el('span', { class: 'grp-count', text: String(g.count) }),
+    ]),
+    body,
+  ]);
+}
+
+/** 多选模式下的勾选框；不在多选模式时返回 null（调用方直接放进 children，null 会被忽略） */
+function pickBox(v) {
+  if (!$('#libMulti').checked) return null;
+  const box = el('input', {
+    type: 'checkbox',
+    class: 'pick',
+    dataset: { pick: String(v.id) },
+    'aria-label': `选择 ${v.title || v.url}`,
+  });
+  box.checked = picked.has(v.id);
+  box.addEventListener('change', () => {
+    if (box.checked) picked.add(v.id); else picked.delete(v.id);
+    renderBulkBar();
+  });
+  return box;
+}
+
+/**
+ * 多选工具栏：**只在多选模式且有选中时出现**。
+ * 用 textContent 建节点（不拼 innerHTML），跟这个文件其它地方一致。
+ */
+function renderBulkBar() {
+  const bar = $('#libBulkBar');
+  if (!$('#libMulti').checked || !picked.size) {
+    bar.hidden = true;
+    clear(bar);
+    return;
+  }
+
+  const opts = [el('option', { value: '', text: '加入分组…' })];
+  for (const g of state.groups || []) {
+    opts.push(el('option', { value: String(g.id), text: g.name }));
+  }
+  const sel = el('select', { class: 'bulk-pick' }, opts);
+  sel.addEventListener('change', () => { if (sel.value) bulkGroupAdd(Number(sel.value)); });
+
+  replace(bar, [
+    el('span', { class: 'bulk-count', text: `已选 ${picked.size} 条` }),
+    sel,
+    el('button', { class: 'btn btn-sm', type: 'button', text: '收藏', onclick: () => bulkStar('star') }),
+    el('button', { class: 'btn btn-sm', type: 'button', text: '取消收藏', onclick: () => bulkStar('unstar') }),
+    el('button', {
+      class: 'btn btn-sm', type: 'button', text: '取消选择',
+      onclick: () => { clearPicked(); renderLibrary(); },
+    }),
+  ]);
+  bar.hidden = false;
+}
+
+async function bulkGroupAdd(groupId) {
+  try {
+    const r = await api('POST', '/api/videos/group-action', { ids: [...picked], add: [groupId] });
+    const skipped = (r.errors || []).length;
+    toast(`已加入 ${r.added} 条${skipped ? `（${skipped} 条被跳过）` : ''}`);
+    clearPicked();
+    await loadGroups();
+    await reload({ reset: true });
+  } catch (err) {
+    toast(formatError(err), 'bad');
+  }
+}
+
+/** 批量收藏：**一次请求**，不是循环发 N 个 */
+async function bulkStar(action) {
+  try {
+    const r = await api('POST', '/api/videos/bulk-action', { ids: [...picked], action });
+    toast(action === 'star' ? `已收藏 ${r.affected} 条` : `已取消收藏 ${r.affected} 条`);
+    clearPicked();
+    await reload({ reset: true });
+  } catch (err) {
+    toast(formatError(err), 'bad');
+  }
 }
 
 /** 缩略图节点：没有封面就放个占位（不要出现破图图标） */
@@ -165,6 +386,7 @@ function thumb(v, cls = 'card-thumb') {
 function buildCard(v) {
   return el('div', { class: 'card', dataset: { id: v.id } }, [
     el('div', { class: 'card-media' }, [
+      pickBox(v),
       thumb(v),
       v.duration ? el('span', { class: 'card-dur', text: fmtDuration(v.duration) }) : null,
       el('span', {
@@ -195,7 +417,10 @@ function buildCard(v) {
 }
 
 function buildRow(v) {
+  // 只调一次：pickBox 会挂 change 监听，调两次就挂两个（重复处理同一次勾选）
+  const box = pickBox(v);
   return el('div', { class: 'lrow', dataset: { id: v.id } }, [
+    box ? el('label', { class: 'pick-wrap' }, [box]) : null,
     thumb(v, 'lrow-thumb'),
     el('div', { class: 'lrow-main' }, [
       el('div', { class: 'lrow-title', text: v.title || '（无标题）' }),
@@ -228,7 +453,11 @@ function buildRow(v) {
 // ---------------------------------------------------------------- 单条动作
 
 async function handleAction(action, id, { onPlay, reload: reloadFn }) {
-  const v = state.library.rows.find((r) => r.id === id);
+  // 分组模式下 rows 是空的，视频在 groups[].rows 里 —— 两处都要能找到
+  const v = state.library.rows.find((r) => r.id === id)
+    || (state.library.grouped
+      ? state.library.grouped.groups.flatMap((g) => g.rows).find((r) => r.id === id)
+      : null);
   if (!v) return;
 
   try {

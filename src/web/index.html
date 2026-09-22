@@ -209,6 +209,21 @@
       <label class="field field-check compact">
         <input type="checkbox" id="libStarred"><span>仅收藏</span>
       </label>
+      <!-- 展示维度：决定列表**怎么分段**。跟下面的"筛选"是两回事，文案要分清，
+           否则用户会以为"点了某个分组名 = 按那个分组分段"。 -->
+      <label class="field compact">
+        <span>展示</span>
+        <select id="libGroupBy">
+          <option value="">不分组</option>
+          <option value="site">按站点分段</option>
+          <option value="group">按分组分段</option>
+        </select>
+      </label>
+      <label class="field field-check compact">
+        <input type="checkbox" id="libMulti"><span>多选</span>
+      </label>
+      <!-- 只显示某一个自定义分组（快捷筛选），与上面的"展示维度"互不冲突 -->
+      <select id="libOnlyGroup" hidden><option value="">只看：全部分组</option></select>
       <div class="toolbar-spacer"></div>
       <span class="stat" id="libStat"></span>
       <div class="seg" id="libLayout">
@@ -219,6 +234,9 @@
     </div>
 
     <div id="libEmpty" class="empty" hidden>这里还什么都没有。先去「添加下载」粘个链接试试。</div>
+    <!-- 多选模式下换成这一条（默认隐藏） -->
+    <div class="bulkbar" id="libBulkBar" hidden></div>
+
     <div id="libGrid" class="grid"></div>
     <div id="libList" class="list" hidden></div>
     <div class="loadmore" id="loadMoreWrap" hidden>

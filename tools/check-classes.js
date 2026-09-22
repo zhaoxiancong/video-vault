@@ -76,8 +76,15 @@ function walk(dir, out = []) {
  */
 const CLASS_RE = /^-?[_a-zA-Z][\w-]*$/;
 
-/** 模板拼出来的类前缀（`tone-${x}` → tone-ok / tone-bad…，这些在样式表里都有） */
-const DYN_PREFIX = /^tone-$/;
+/**
+ * 模板拼出来的类前缀（`tone-${x}` → tone-ok / tone-bad…，这些在样式表里都有）。
+ *
+ * `c-${color}` 是分组色点（`.c-amber` / `.c-blue` …）—— 颜色 key 从后端来，
+ * 静态求不出具体值，所以只认前缀。**前提是样式表里真的写了那几个颜色类**：
+ * `styles.css` 的「分组」一节逐个列出了允许的颜色，多一个少一个都会被
+ * 视觉检查发现。前缀匹配是个受控的让步，不是后门。
+ */
+const DYN_PREFIX = /^(tone-|c-)$/;
 
 /**
  * 去掉注释再抽取。

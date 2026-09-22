@@ -718,3 +718,202 @@ test('库页：点收藏会调用 action 接口，而不是只改本地', async 
     assert.equal(hit.body.action, 'star');
   } finally { dom.restore(); }
 });
+
+// ---------------------------------------------------------------- 库页分组
+
+/**
+ * 造一个"分组后的库"假响应。
+ *
+ * ⚠️ `by` 必须跟着请求走，不能写死。原因：`state.prefs.library` 是**模块级**对象，
+ *    而 DOM 垫片每个测试只重置 DOM 与 localStorage，**不重置模块状态** ——
+ *    于是"上一条测试把 by 设成了 site"会漏到下一条测试里。
+ *    写死 `by: 'site'` 时，前端拿到的响应与自己请求的维度对不上，
+ *    `renderLibrary` 就会走错分支（表现为"选了 group 却按 site 渲染"）。
+ *    让假响应回显请求参数，测试之间就干净了 —— 这也更接近真实服务端的行为。
+ */
+function groupedResponse(by = 'site') {
+  const row = (id, title) => ({
+    id, url: `https://x/${id}`, title, site: 'Youtube', status: 'done',
+    created_at: '2026-09-22 10:00', file_path: `D:\\dl\\${id}.mp4`, starred: false, height: 1080,
+  });
+  return {
+    by, total: 3, shown: 3, truncated: false, cap: 2000,
+    groups: [
+      { key: 'Youtube', id: null, name: 'Youtube', color: null, count: 2, rows: [row(1, '第一'), row(2, '第二')] },
+      { key: 'BiliBili', id: null, name: 'BiliBili', color: null, count: 1, rows: [row(3, '第三')] },
+    ],
+  };
+}
+
+/**
+ * 一组"按站点分段"的响应。
+ * `GET /api/library/grouped` 用函数值 —— 垫片对函数值会**把请求交给它**，
+ * 于是 `by` 能跟着请求走（见上面 groupedResponse 的说明）。
+ */
+function groupedResponses() {
+  return {
+    ...fakeResponses(),
+    'GET /api/library/grouped': (req) => {
+      const u = new URL(req.url, 'http://x');
+      return groupedResponse(u.searchParams.get('by') || 'site');
+    },
+    'GET /api/groups': { groups: [{ id: 9, name: '待看', color: 'amber', count: 0 }] },
+  };
+}
+
+/** 切到某个展示维度（等价于用户在下拉里选一下） */
+async function chooseGroupBy(value) {
+  const sel = globalThis.document.getElementById('libGroupBy');
+  assert.ok(sel, 'index.html 里应当有 #libGroupBy');
+  sel.value = value;
+  sel.dispatchEvent(new globalThis.Event('change'));
+  await new Promise((r) => setTimeout(r, 40));
+}
+
+test('库页分组：切到按站点分段后，出现两段且标题带条数', async () => {
+  const { dom } = await bootFrontend({ responses: groupedResponses() });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    await chooseGroupBy('site');
+
+    const heads = globalThis.document.querySelectorAll('#libGrid .grp-head');
+    assert.equal(heads.length, 2, `应当有两段，实际 ${heads.length}`);
+    const names = [...globalThis.document.querySelectorAll('#libGrid .grp-name')].map((n) => n.textContent);
+    assert.deepEqual(names, ['Youtube', 'BiliBili']);
+    const counts = [...globalThis.document.querySelectorAll('#libGrid .grp-count')].map((n) => n.textContent);
+    assert.deepEqual(counts, ['2', '1'], '条数要渲染出来');
+
+    // 卡片真的在各段里面（不是只画了标题）
+    assert.equal(globalThis.document.querySelectorAll('#libGrid .grp-body .card').length, 3);
+  } finally { dom.restore(); }
+});
+
+test('库页分组：走的是 grouped 接口（不是普通 library 接口）', async () => {
+  const { dom } = await bootFrontend({ responses: groupedResponses() });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+    await chooseGroupBy('group');
+
+    const grouped = dom.calls.filter((c) => c.url.includes('/api/library/grouped'));
+    assert.ok(grouped.length, '切到分组模式必须请求 grouped 接口');
+    /**
+     * ⚠️ 用 `some` 而不是 `find` + 断言第一条。
+     * `state` 是**模块级**的，垫片每个测试只重置 DOM 与 localStorage ——
+     * 于是"上一条测试留下的请求"也在 `dom.calls` 里，`find` 会命中它，
+     * 断言就变成了在考验测试顺序，而不是在考验代码。
+     */
+    assert.ok(grouped.some((c) => /by=group/.test(c.url)),
+      `要有一次 by=group 的请求，实际：${grouped.map((c) => c.url).join(' | ')}`);
+    // 反向：分组模式下不该再去请求"平铺列表"的那条（by 为空）
+    assert.ok(!grouped.some((c) => !/by=/.test(c.url)), '分组请求必须带 by');
+  } finally { dom.restore(); }
+});
+
+test('库页分组：分组模式下不出现「加载更多」', async () => {
+  const { dom } = await bootFrontend({ responses: groupedResponses() });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+    await chooseGroupBy('site');
+    assert.equal(globalThis.document.getElementById('loadMoreWrap').hidden, true,
+      '已经全量了，不该再给「加载更多」');
+  } finally { dom.restore(); }
+});
+
+test('库页分组：点标题能折叠，且状态写进 localStorage', async () => {
+  const { dom } = await bootFrontend({ responses: groupedResponses() });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+    await chooseGroupBy('site');
+
+    const head = globalThis.document.querySelector('#libGrid .grp-head');
+    head.click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    /**
+     * ⚠️ 两个坑，都在这里踩过：
+     *
+     * 1. **要查文档里的新节点。** `renderLibrary()` 折叠后会 `replace()` 重建 DOM，
+     *    之前 `querySelectorAll` 拿到的那些节点已经**脱离文档**了，它们的 `hidden`
+     *    永远停在旧值 —— 查它们会得到"折叠没生效"的假结论。
+     *    所以重新查一遍，并直接用属性选择器 `.grp-body[hidden]`。
+     * 2. **localStorage 的 key 是 `videoVault.prefs.v2`**（见 `state.js` 的 PREF_KEY），
+     *    不是想当然的 `vv.prefs`。查错 key 会得到"没持久化"的假结论。
+     */
+    const collapsedBodies = globalThis.document.querySelectorAll('#libGrid .grp-body[hidden]');
+    assert.ok(collapsedBodies.length > 0, '点一下要把分组收起（.grp-body 应当带 hidden）');
+    assert.match(String(globalThis.localStorage.getItem('videoVault.prefs.v2')), /collapsed/,
+      '折叠状态要持久化');
+  } finally { dom.restore(); }
+});
+
+test('库页分组：截断时要明说「只分组了前 N 条」', async () => {
+  const r = groupedResponse();
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/library/grouped': { ...r, total: 5000, shown: 2000, truncated: true, cap: 2000 },
+      'GET /api/groups': { groups: [] },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+    await chooseGroupBy('site');
+    const stat = globalThis.document.getElementById('libStat').textContent;
+    assert.match(stat, /只分组了前 2000 条/, `要明说截断了，实际「${stat}」`);
+  } finally { dom.restore(); }
+});
+
+test('库页分组：空分组显示「这个分组还是空的」，不是空白', async () => {
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/library/grouped': {
+        by: 'group', total: 0, shown: 0, truncated: false, cap: 2000,
+        groups: [{ key: '9', id: 9, name: '待看', color: 'amber', count: 0, rows: [] }],
+      },
+      'GET /api/groups': { groups: [{ id: 9, name: '待看', color: 'amber', count: 0 }] },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+    await chooseGroupBy('group');
+
+    const empty = globalThis.document.querySelector('#libGrid .grp-empty');
+    assert.ok(empty, '空分组要有提示文字');
+    assert.match(empty.textContent, /空/);
+    // 颜色点：自定义分组有颜色（用 some —— 理由同上：模块状态会跨测试残留）
+    assert.ok(
+      [...globalThis.document.querySelectorAll('#libGrid .grp-dot')].some((d) => d.classList.contains('c-amber')),
+      '有颜色的分组要画色点',
+    );
+  } finally { dom.restore(); }
+});
+
+test('库页分组：标题里的尖括号原样保留（防注入）', async () => {
+  const nasty = '<img src=x onerror=alert(1)>';
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/library/grouped': {
+        by: 'site', total: 1, shown: 1, truncated: false, cap: 2000,
+        groups: [{ key: nasty, id: null, name: nasty, color: null, count: 1, rows: [] }],
+      },
+      'GET /api/groups': { groups: [] },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 30));
+    await chooseGroupBy('site');
+    const name = globalThis.document.querySelector('#libGrid .grp-name');
+    assert.equal(name.textContent, nasty, '文本原样保留');
+    assert.equal(name.children.length, 0, '不该被解析成子元素');
+  } finally { dom.restore(); }
+});
