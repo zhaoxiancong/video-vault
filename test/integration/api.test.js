@@ -991,3 +991,55 @@ test('只看某个分组：groupId 不是数字时要 400，而不是当成没�
     assert.ok(r.data.hint, '要告诉用户这个参数该是什么');
   } finally { await s.cleanup(); }
 });
+
+// ---------------------------------------------------------------- 2000 上限
+
+/**
+ * 评审 I4：2000 上限与 `truncated` 的**服务端计算**原本没有任何测试 ——
+ * 把 `slice(0, GROUP_CAP)` 删掉、或把 `truncated` 写死 false，全套依然全绿。
+ * 而"分组时封顶 2000 条并在界面明说"是用户明确要求的行为（spec 决定 #5）。
+ *
+ * 直接调 `repo.insertVideo` 灌数据，不走 API（2001 次 HTTP 太慢）。
+ */
+test('分组上限：超过 2000 条时要截断并如实上报 truncated', async () => {
+  const s = await startApp();
+  try {
+    const CAP = 2000;
+    for (let i = 0; i < CAP + 1; i++) {
+      s.app.repo.insertVideo({
+        url: `https://bulk.example/v/${i}`,
+        title: `bulk ${i}`,
+        site: i % 2 === 0 ? 'Youtube' : 'BiliBili',
+        status: 'done',
+      });
+    }
+
+    const r = await s.call('GET', '/api/library/grouped?by=site');
+    assert.equal(r.status, 200);
+    assert.equal(r.data.cap, CAP);
+    assert.equal(r.data.total, CAP + 1, 'total 是筛选后的真实总数，不受封顶影响');
+    assert.equal(r.data.shown, CAP, `只该返回 ${CAP} 条参与分组`);
+    assert.equal(r.data.truncated, true, '超了必须如实上报 truncated');
+
+    const sum = r.data.groups.reduce((a, g) => a + g.count, 0);
+    assert.equal(sum, CAP, `各段条数之和应当是 ${CAP}，实际 ${sum}`);
+    for (const g of r.data.groups) {
+      assert.equal(g.rows.length, g.count, `${g.name} 的 rows 与 count 不一致`);
+    }
+  } finally { await s.cleanup(); }
+});
+
+test('分组上限：正好 2000 条时不该算截断（边界）', async () => {
+  const s = await startApp();
+  try {
+    for (let i = 0; i < 2000; i++) {
+      s.app.repo.insertVideo({
+        url: `https://edge.example/v/${i}`, title: `edge ${i}`, site: 'Youtube', status: 'done',
+      });
+    }
+    const r = await s.call('GET', '/api/library/grouped?by=site');
+    assert.equal(r.data.total, 2000);
+    assert.equal(r.data.shown, 2000);
+    assert.equal(r.data.truncated, false, '正好到上限不算截断 —— 差一条就报截断会误导用户');
+  } finally { await s.cleanup(); }
+});
