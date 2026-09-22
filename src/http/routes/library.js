@@ -16,6 +16,27 @@ const SORTS = ['created_desc', 'created_asc', 'title_asc', 'size_desc', 'duratio
 /** 分组时最多处理多少条。超了就明说 `truncated`，不假装分完了 */
 const GROUP_CAP = 2000;
 
+/**
+ * 解析 `groupId` 查询参数。
+ *
+ * 返回 `null` 表示**不按分组筛选**；返回数字表示只看那一组。
+ *
+ * ⚠️ 非法值要**报错**，不能静默当成"没传"。理由：这是个筛选条件，
+ *    用户明明写了 `groupId=abc`，如果悄悄忽略，他会看到"全部视频"，
+ *    以为这个筛选没用或者自己点错了 —— 而真正的原因是参数根本没生效。
+ *    报错至少让他知道哪里写错了。
+ */
+function parseGroupId(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new ValidationError(`groupId 必须是正整数，收到的是「${raw}」`, {
+      hint: 'groupId 是自定义分组的 id（正整数）。想取消这个筛选就别传这个参数。',
+    });
+  }
+  return n;
+}
+
 function register(router, ctx) {
   const { repo, scheduler, downloader, config, migrations, dupMerged } = ctx;
 
@@ -82,6 +103,9 @@ function register(router, ctx) {
       site: url.searchParams.get('site') || '',
       uploader: url.searchParams.get('uploader') || '',
       starred: url.searchParams.get('starred') === '1',
+      // 「只看某个分组」（快捷筛选）。与 /api/library/grouped 用同一份解析，
+      // 所以两个接口对非法值的处理是一致的。
+      groupId: parseGroupId(url.searchParams.get('groupId')),
       // 白名单：排序字段拼进 SQL 的 ORDER BY，绝不能直接信前端
       sort: SORTS.includes(sortRaw) ? sortRaw : 'created_desc',
       limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 200))),
@@ -119,6 +143,7 @@ function register(router, ctx) {
       site: sp.get('site') || '',
       uploader: sp.get('uploader') || '',
       starred: sp.get('starred') === '1',
+      groupId: parseGroupId(sp.get('groupId')),
       sort: sp.get('sort') || 'created_desc',
     };
 

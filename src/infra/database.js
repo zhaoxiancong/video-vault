@@ -440,7 +440,8 @@ function createDatabase(config, options = {}) {
    * @returns {{whereSql:string, args:any[], orderBy:string}}
    */
   function buildVideoQuery({
-    q = '', status = '', site = '', uploader = '', starred = false, sort = 'created_desc',
+    q = '', status = '', site = '', uploader = '', starred = false,
+    groupId = null, sort = 'created_desc',
   } = {}) {
     const where = [];
     const args = [];
@@ -453,6 +454,22 @@ function createDatabase(config, options = {}) {
     if (site) { where.push('site = ?'); args.push(site); }
     if (uploader) { where.push('uploader = ?'); args.push(uploader); }
     if (starred) where.push('starred = 1');
+    /**
+     * 「只看某个分组」。
+     *
+     * 用 EXISTS 子查询而不是 JOIN：JOIN 会把一条记录按成员行数**复制多份**
+     * （虽然主键保证一个视频在一个组里只出现一次，但多对多语义下一旦写错
+     * 就会变成重复行），而 `total` 那个 COUNT 查询也得跟着改写成
+     * `COUNT(DISTINCT ...)`。EXISTS 两处都不用动，语义也更直白。
+     *
+     * 传 null / undefined 表示**不按分组筛选**（注意别把 `0` 当"没传"——
+     * 分组 id 从 1 开始，但 `Number(null)` 是 0 而 `Number(undefined)` 是 NaN，
+     * 所以这里显式判断 `!= null`）。
+     */
+    if (groupId != null) {
+      where.push('EXISTS (SELECT 1 FROM video_groups vg WHERE vg.video_id = videos.id AND vg.group_id = ?)');
+      args.push(Number(groupId));
+    }
 
     const sorts = {
       created_desc: 'created_at DESC',

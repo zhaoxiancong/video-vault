@@ -928,3 +928,66 @@ test('分组接口：by 缺省时按站点分段（不是报错）', async () =>
     assert.equal(r.data.groups.length, 1);
   } finally { await s.cleanup(); }
 });
+
+// ---------------------------------------------------------------- 只看某个分组
+
+test('只看某个分组：/api/library?groupId= 只返回那一组的成员', async () => {
+  const s = await startApp();
+  try {
+    const ids = await seedSites(s, [
+      ['https://x/1', 'Youtube'], ['https://x/2', 'Youtube'], ['https://x/3', 'Youtube'],
+    ]);
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+    await s.call('POST', '/api/videos/group-action', { ids: [ids[0], ids[2]], add: [g.data.id] });
+
+    const r = await s.call('GET', `/api/library?groupId=${g.data.id}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.data.total, 2, '只该有这一组的 2 条');
+    assert.deepEqual(r.data.rows.map((x) => x.id).sort(), [ids[0], ids[2]].sort());
+  } finally { await s.cleanup(); }
+});
+
+test('只看某个分组：和分组展示能叠加（筛选先于分组）', async () => {
+  const s = await startApp();
+  try {
+    const ids = await seedSites(s, [
+      ['https://x/1', 'Youtube'], ['https://x/2', 'BiliBili'],
+      ['https://x/3', 'Youtube'], ['https://x/4', 'Youtube'],
+    ]);
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+    const other = await s.call('POST', '/api/groups', { name: '别的组' });
+    // ⚠️ 关键：第四条**只属于另一个组**。如果筛选没生效，它就会漏进来 ——
+    //    第一版测试把全部视频都放进了同一个组，那种场景下"筛没筛"结果一样，
+    //    根本区分不出来（测试写弱了，不是代码对了）。
+    await s.call('POST', '/api/videos/group-action', { ids: [ids[0], ids[1], ids[2]], add: [g.data.id] });
+    await s.call('POST', '/api/videos/group-action', { ids: [ids[3]], add: [other.data.id] });
+
+    const r = await s.call('GET', `/api/library/grouped?by=site&groupId=${g.data.id}`);
+    assert.equal(r.data.total, 3, '只看这一组时 total 是组内条数（第四条不该算进来）');
+    const names = r.data.groups.map((x) => x.name).sort();
+    assert.deepEqual(names, ['BiliBili', 'Youtube'], '按站点分段后仍只有组内成员的段');
+    assert.equal(r.data.groups.find((x) => x.name === 'Youtube').count, 2);
+    assert.equal(r.data.groups.find((x) => x.name === 'BiliBili').count, 1);
+    const allIds = r.data.groups.flatMap((x) => x.rows.map((v) => v.id));
+    assert.ok(!allIds.includes(ids[3]), '别的组的成员绝不能出现');
+  } finally { await s.cleanup(); }
+});
+
+test('只看某个分组：组不存在时返回空列表，不是报错', async () => {
+  const s = await startApp();
+  try {
+    await seedSites(s, [['https://x/1', 'Youtube']]);
+    const r = await s.call('GET', '/api/library?groupId=999999');
+    assert.equal(r.status, 200);
+    assert.equal(r.data.total, 0, '不存在的分组 = 没有成员，不该 500');
+  } finally { await s.cleanup(); }
+});
+
+test('只看某个分组：groupId 不是数字时要 400，而不是当成没传', async () => {
+  const s = await startApp();
+  try {
+    const r = await s.call('GET', '/api/library?groupId=abc');
+    assert.equal(r.status, 400, '不能静默忽略一个明显写错的筛选条件');
+    assert.ok(r.data.hint, '要告诉用户这个参数该是什么');
+  } finally { await s.cleanup(); }
+});

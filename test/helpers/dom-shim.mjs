@@ -117,12 +117,13 @@ export class FakeElement extends FakeNode {
         .map((k) => camel(k.slice(5))),
       getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
     });
+    // value / checked / hidden / textContent 都是**原型上的访问器**，
+    // 这里不能再用普通属性盖掉它们（盖掉之后 `_attrs` 同步就断了，
+    // 会得到"代码明明做了、测试说没做"那类假失败）。下面这几行只是把它们初始化。
     this.value = '';
     this.checked = false;
     this.disabled = false;
     this.hidden = false;
-    // textContent 是原型上的访问器（递归收集子节点文本），这里**不能**再赋一个
-    // 普通属性把它盖掉 —— 盖掉之后有子节点的元素读出来永远是空字符串。
     this.href = '';
     this.src = '';
     this.files = [];
@@ -148,6 +149,25 @@ export class FakeElement extends FakeNode {
 
   get type() { return this._attrs.type || ''; }
   set type(v) { this._attrs.type = String(v); }
+
+  /**
+   * `value` 与 `checked` 同样必须是**访问器**，不能只是普通属性 ——
+   * 与 `hidden` 是同一类缺口（见下），只是表现更隐蔽。
+   *
+   * 踩过的坑：`el('option', { value: '9' })` 只写了个 JS 属性，`_attrs` 里没有，
+   * 于是 `querySelectorAll('option')` 拿到的选项 `getAttribute('value')` 是空字符串。
+   * 表现是"下拉里明明有这一项，测试却说没有" —— 而按 `value` 找选项是很自然的写法。
+   *
+   * 真相放在 `_attrs` 上，两种写法（读写属性 / 读写 attribute）就一致了。
+   */
+  get value() { return 'value' in this._attrs ? this._attrs.value : ''; }
+  set value(v) { this._attrs.value = String(v); }
+
+  get checked() { return this.hasAttribute('checked'); }
+  set checked(v) {
+    if (v) this._attrs.checked = '';
+    else delete this._attrs.checked;
+  }
 
   /**
    * `hidden` 必须是**访问器**，不能只是普通属性。
@@ -308,10 +328,22 @@ export class FakeElement extends FakeNode {
      * 而且**不报错、只是静默返回 false**。表现是"代码明明把元素藏了，
      * 测试却说没藏"，而 `el.hidden` 读出来是对的，非常难查。
      *
-     * 现在 `.类名[属性]` 与 `#id[属性]` 先在这里处理，两种写法都支持
-     * （`[hidden]` 这种无值属性和 `[data-x="1"]` 这种有值属性都行）。
+     * 现在 `.类名[属性]` 与 `#id[属性]` 先在这里处理。
+     *
+     * ⚠️ 属性部分必须**同时支持无值和有值**两种写法 —— 第一版的正则写成了
+     *    `(?:\[[\w-]+\])+`（只认 `[hidden]` 这种），于是
+     *    `.tab[data-view=library]` 匹配不上、掉进下面的 `.类名` 分支、
+     *    **静默返回 false**。那是个能力回归：旧代码本来是支持它的，
+     *    而现有用例恰好都写成 `querySelectorAll('.tab')` 再 find，所以没被踩到。
+     *
+     * 本垫片支持的组合选择器形态（写在这里当清单，改之前先看）：
+     *   `.类名`  `.类名[属性]`  `.类名[属性=值]`  `.类名[属性="值"]`
+     *   `#id`    `#id[属性]`    `#id[属性=值]`
+     *   标签      `标签.类名`     `标签#id`          `标签[属性=值]`
+     *   `后代 组合`（空格分隔）· 逗号分隔的并列
+     * 不支持：`>` `+` `~`（会退化成"只看最后一段"，见 matchesSelector）、伪类、`*`。
      */
-    const combo = s.match(/^([.#][\w-]+)((?:\[[\w-]+\])+)$/);
+    const combo = s.match(/^([.#][\w-]+)((?:\[[^\]]+\])+)$/);
     if (combo) {
       const base = combo[1].startsWith('.')
         ? this.classList.contains(combo[1].slice(1))
@@ -339,14 +371,14 @@ export class FakeElement extends FakeNode {
         ? this.classList.contains(tm[2].slice(1))
         : this.id === tm[2].slice(1);
     }
-    // 形如 "div[data-view=x]" 的组合
-    const cm = s.match(/^([a-zA-Z][\w-]*)(\[[^\]]+\])$/);
+    // 形如 "div[data-view=x]" 与 "div[hidden]" 的组合
+    const cm = s.match(/^([a-zA-Z][\w-]*)((?:\[[^\]]+\])+)$/);
     if (cm) {
       if (this.tagName !== cm[1].toUpperCase()) return false;
-      const am = cm[2].match(/^\[([\w-]+)(?:=["']?([^"'\]]*)["']?)?\]$/);
-      return am
-        ? (am[2] === undefined ? this.hasAttribute(am[1]) : this.getAttribute(am[1]) === am[2])
-        : false;
+      return [...cm[2].matchAll(/\[([\w-]+)(?:=["']?([^"'\]]*)["']?)?\]/g)]
+        .every(([, name, val]) => (val === undefined
+          ? this.hasAttribute(name)
+          : this.getAttribute(name) === val));
     }
     return false;
   }

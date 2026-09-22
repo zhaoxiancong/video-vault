@@ -404,6 +404,83 @@ test('垫片：元素该有的常用方法都在（缺一个就会产生一堆�
   } finally { dom.restore(); }
 });
 
+/**
+ * 选择器能力。这个垫片已经因为"与真实 DOM 有偏差"吃过好几次亏
+ * （`hidden` 不是访问器、`textContent` 不递归、`.类名[带值属性]` 静默不匹配），
+ * 每一次的表现都是**代码明明做了、测试说没做**。所以把支持的形态逐条钉住。
+ */
+test('垫片：组合选择器的各种形态都要能用（含类名+带值属性）', () => {
+  const dom = installDom({ html: HTML });
+  try {
+    const doc = globalThis.document;
+    // 四种"属性"写法都要认
+    assert.equal(doc.querySelectorAll('.tab[data-view=library]').length, 1,
+      '类名 + 带值属性（不加引号）');
+    assert.equal(doc.querySelectorAll('.tab[data-view="library"]').length, 1,
+      '类名 + 带值属性（双引号）');
+    assert.equal(doc.querySelectorAll('[data-view=library]').length, 1, '只有带值属性');
+    assert.equal(doc.querySelectorAll('button[data-view=library]').length, 1, '标签 + 带值属性');
+
+    // 无值属性（这是上一次踩坑的形态，别再退化）
+    const probe = doc.createElement('div');
+    probe.className = 'probe-box';
+    doc.body.append(probe);
+    probe.hidden = true;
+    assert.equal(doc.querySelectorAll('.probe-box[hidden]').length, 1,
+      '类名 + 无值属性（且用属性赋值写的 hidden）');
+    probe.hidden = false;
+    assert.equal(doc.querySelectorAll('.probe-box[hidden]').length, 0, '取消后不该再匹配');
+    probe.remove();
+
+    // 属性值不匹配时必须是 0，不能"匹配任意"
+    assert.equal(doc.querySelectorAll('.tab[data-view=nope]').length, 0, '值不对就不该匹配');
+
+    // 后代组合与逗号并列（这两条是前端在用、且已有测试依赖的形态）
+    assert.ok(doc.querySelectorAll('#libGrid [data-id]').length >= 0, '后代组合不该抛异常');
+    assert.equal(doc.querySelectorAll('.tab[data-view=library], .tab[data-view=add]').length, 2,
+      '逗号并列应当合并结果');
+  } finally { dom.restore(); }
+});
+
+test('垫片：textContent 要递归收集子节点文本', () => {
+  const dom = installDom({ html: HTML });
+  try {
+    const doc = globalThis.document;
+    const box = doc.createElement('div');
+    const inner = doc.createElement('span');
+    inner.textContent = '已选 1 条';
+    box.append(inner);
+    doc.body.append(box);
+    // 这条踩过：textContent 曾经只是个普通字符串属性，
+    // 于是"有子节点的元素读出来是空字符串"，而 children.length 又是对的
+    assert.equal(box.textContent, '已选 1 条', 'textContent 必须递归收集子孙文本');
+
+    // 写的时候要清空子节点
+    box.textContent = '换了';
+    assert.equal(box.children.length, 0, '写 textContent 应当清空子节点');
+    assert.equal(box.textContent, '换了');
+    box.remove();
+  } finally { dom.restore(); }
+});
+
+test('垫片：表单元素的 value / checked 要能按属性查（el() 与 attribute 一致）', () => {
+  const dom = installDom({ html: HTML });
+  try {
+    const doc = globalThis.document;
+    const sel = doc.createElement('select');
+    const opt = doc.createElement('option');
+    opt.value = '9';           // 只写 JS 属性，不调 setAttribute
+    opt.textContent = '待看';
+    sel.append(opt);
+    doc.body.append(sel);
+
+    assert.equal(opt.value, '9');
+    assert.equal(opt.getAttribute('value'), '9',
+      'el({value}) 写的值必须同步到 attribute —— 否则 querySelectorAll 按 value 找不到选项');
+    sel.remove();
+  } finally { dom.restore(); }
+});
+
 // ---------------------------------------------------------------- 「找视频」页
 
 /** 造一批候选，覆盖"未下过 / 已在库 / 已入队"三种状态与缺失时长 */
@@ -1243,5 +1320,132 @@ test('分组管理：名字为空时不发请求，并在弹层里报错', async
     const err = globalThis.document.querySelector('#modal .form-error');
     assert.ok(err && !err.hidden, '要在弹层里显示错误，而不是静默什么也不做');
     assert.match(err.textContent, /名字/);
+  } finally { dom.restore(); }
+});
+
+// ---------------------------------------------------------------- 只看某个分组（快捷筛选）
+
+test('只看某个分组：选中后请求里必须带 groupId', async () => {
+  const { dom } = await bootFrontend({
+    responses: {
+      ...multiResponses(),
+      'GET /api/library': { total: 1, rows: [{
+        id: 1, url: 'https://x/1', title: 'a', status: 'done',
+        created_at: '2026-09-22 10:00', file_path: 'D:\\1.mp4', starred: false,
+      }] },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const sel = globalThis.document.getElementById('libOnlyGroup');
+    assert.ok(sel, 'index.html 里应当有 #libOnlyGroup');
+    assert.equal(sel.hidden, false, '有自定义分组时这个下拉要显示出来');
+    const opt = [...sel.querySelectorAll('option')].find((o) => o.value === '9');
+    assert.ok(opt, `下拉里应当有待看这一项，实际选项：${[...sel.querySelectorAll('option')].map((o) => o.value + ':' + o.textContent).join(' | ')}`);
+
+    sel.value = '9';
+    sel.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 60));
+
+    // ⚠️ 这条是审计出来的漏做：曾经只把值存进偏好、从没发给接口，
+    //    于是"只看：待看"选了什么都不发生，而界面上完全看不出问题。
+    const hit = dom.calls.filter((c) => c.url.includes('/api/library') && c.url.includes('groupId=9'));
+    assert.ok(hit.length > 0,
+      `选中分组后请求必须带 groupId=9。实际请求：${dom.calls.filter((c) => c.url.includes('/api/library')).map((c) => c.url).join(' | ')}`);
+
+    // 取消选择后不该再带这个参数
+    sel.value = '';
+    sel.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 60));
+    const after = dom.calls[dom.calls.length - 1];
+    assert.ok(!after.url.includes('groupId='),
+      `取消"只看"之后不该再带 groupId，实际 ${after.url}`);
+  } finally { dom.restore(); }
+});
+
+test('只看某个分组：分组模式下也带 groupId（两种模式叠加）', async () => {
+  const { dom } = await bootFrontend({
+    responses: {
+      ...groupedResponses(),
+      'GET /api/groups': { groups: [{ id: 9, name: '待看', color: 'amber', count: 3 }] },
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const sel = globalThis.document.getElementById('libOnlyGroup');
+    sel.value = '9';
+    sel.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 60));
+
+    await chooseGroupBy('site');
+    const grouped = dom.calls.filter((c) => c.url.includes('/api/library/grouped'));
+    assert.ok(grouped.some((c) => /groupId=9/.test(c.url)),
+      `分组模式下也要带 groupId。实际：${grouped.map((c) => c.url).join(' | ')}`);
+  } finally { dom.restore(); }
+});
+
+// ---------------------------------------------------------------- 分组 × 列表视图
+
+/**
+ * 切到列表布局（等价于点工具栏那个「列表」按钮）
+ * @param {boolean} drawAgain 点完之后是否直接调 renderLibrary()（模拟真实前端的行为）
+ */
+async function chooseLayout(name) {
+  const btn = [...globalThis.document.querySelectorAll('#libLayout .seg-btn')]
+    .find((b) => b.dataset.layout === name);
+  assert.ok(btn, `应当有 ${name} 视图按钮`);
+  btn.click();
+  await new Promise((r) => setTimeout(r, 60));
+}
+
+test('分组 + 列表视图：必须能看到分段和行，不能白屏（评审 C1）', async () => {
+  const { dom } = await bootFrontend({ responses: groupedResponses() });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    // 先切成列表视图，再开分组 —— 这是评审实测白屏的路径之一
+    await chooseLayout('list');
+    await chooseGroupBy('site');
+
+    const grid = globalThis.document.getElementById('libGrid');
+    const list = globalThis.document.getElementById('libList');
+
+    // 可见的那个容器里必须有内容（另一个是隐藏的）
+    const visible = grid.hidden ? list : grid;
+    assert.equal(visible.hidden, false, '可见容器不该是 hidden');
+    assert.ok(visible.textContent.includes('Youtube'),
+      `可见容器里应当能看到分段标题，实际文本：「${visible.textContent}」`);
+    assert.ok(visible.querySelectorAll('.grp').length > 0, '可见容器里应当有分段');
+
+    // 列表视图下分段里应当是"行"，不是"卡片"
+    assert.ok(list.querySelectorAll('.lrow').length > 0,
+      `列表视图的分段里应当有行（.lrow），实际 ${list.querySelectorAll('.lrow').length} 行`);
+    assert.equal(grid.querySelectorAll('.card').length, 0, '列表视图下网格容器不该有卡片');
+
+    // 反向：整个可见区域不能是空的（原 bug 的表现就是可见区 textContent 为空）
+    assert.notEqual(visible.textContent.trim(), '', '可见区不能是空的（那就是白屏）');
+  } finally { dom.restore(); }
+});
+
+test('分组 + 列表视图：先分组再点「列表」也要能看见（评审 C1 的另一条路径）', async () => {
+  const { dom } = await bootFrontend({ responses: groupedResponses() });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    await chooseGroupBy('site');        // 先开分组（此时是网格视图）
+    await chooseLayout('list');          // 再点列表 —— 原来这条路径会白屏
+
+    const grid = globalThis.document.getElementById('libGrid');
+    const list = globalThis.document.getElementById('libList');
+    const visible = grid.hidden ? list : grid;
+    assert.ok(visible.textContent.includes('Youtube'),
+      `点完「列表」之后必须还能看见分段，实际文本：「${visible.textContent}」`);
+    assert.ok(list.querySelectorAll('.lrow').length > 0, '分段里应当是行');
   } finally { dom.restore(); }
 });

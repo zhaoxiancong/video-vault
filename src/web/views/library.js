@@ -81,8 +81,16 @@ export function initLibraryView({ onPlay }) {
   $('#libLayout').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-layout]');
     if (!btn) return;
-    setLayout(btn.dataset.layout);
     savePrefs({ library: { view: btn.dataset.layout } });
+    /**
+     * ⚠️ 必须**重绘**，不能只切 hidden。
+     *
+     * 分组模式下内容是画进"当前视图对应的那个容器"的，所以换视图 = 内容要搬家。
+     * 原来这里只切显隐，于是"先开分组再点列表"会白屏 ——
+     * 内容还留在被隐藏的 #libGrid 里，而 #libList 是空的。
+     * （另一半原因是分组分支曾经无条件画进 #libGrid，两处一起才构成白屏。）
+     */
+    renderLibrary();
   });
 
   $('#btnRefresh').addEventListener('click', () => reload({ reset: true }));
@@ -131,6 +139,17 @@ export async function reload({ reset = true } = {}) {
   };
 
   try {
+    /**
+     * 「只看某个分组」是**服务端筛选**（`groupId` 参数），
+     * 两种展示模式下都生效。
+     *
+     * ⚠️ 这里曾经只把它存进偏好、从没发给接口 —— 于是"只看：待看"选了什么都不发生，
+     *    而界面上又看不出哪里不对（下拉的值确实变了）。是审计时才发现的漏做。
+     */
+    const extra = new URLSearchParams();
+    if (lib.starred) extra.set('starred', '1');
+    if (lib.onlyGroup) extra.set('groupId', String(lib.onlyGroup));
+
     if (lib.by) {
       /**
        * 分组模式：**走服务端分组、忽略分页**。
@@ -138,18 +157,19 @@ export async function reload({ reset = true } = {}) {
        * 自己归并出来的数字只能是"这一页里有多少条"，那是错的。
        */
       const qs = new URLSearchParams({ ...base, by: lib.by });
-      if (lib.starred) qs.set('starred', '1');
+      for (const [k, v] of extra) qs.set(k, v);
       const data = await api('GET', `/api/library/grouped?${qs}`);
       state.library = { grouped: data, rows: [], total: data.total };
     } else {
       const qs = new URLSearchParams({ ...base, limit: String(PAGE), offset: String(offset) });
-      if (lib.starred) qs.set('starred', '1');
+      for (const [k, v] of extra) qs.set(k, v);
       const data = await api('GET', `/api/library?${qs}`);
       state.library = reset
         ? { ...data, grouped: null }
         : { total: data.total, rows: [...state.library.rows, ...data.rows], grouped: null };
     }
     renderLibrary();
+
 
     // 顺手刷一下筛选项（新下载的站点/作者要出现在下拉里）
     if (!state.facets || reset) await loadFacets();
@@ -223,8 +243,19 @@ function clearPicked() {
   picked.clear();
 }
 
+/**
+ * 当前视图该用哪个容器（网格还是列表）。
+ * **只在这里判断**，别在别处再判断一次 —— 那正是白屏 bug 的来源。
+ */
+function containersFor(view) {
+  const grid = view === 'list' ? null : $('#libGrid');
+  const list = view === 'list' ? $('#libList') : null;
+  return { grid, list };
+}
+
 export function renderLibrary() {
   const lib = state.prefs.library;
+  const view = lib.view || 'grid';
   const grid = $('#libGrid');
   const list = $('#libList');
   const empty = $('#libEmpty');
@@ -238,9 +269,7 @@ export function renderLibrary() {
     // 已经全量拿回来了，不该再给"加载更多"
     $('#loadMoreWrap').hidden = true;
     empty.hidden = g.groups.length > 0;
-    replace(grid, g.groups.map((grp) => buildGroup(grp, lib.view || 'grid')));
-    replace(list, []);
-    setLayout(lib.view || 'grid');
+    renderGrouped(g.groups, view);
     renderBulkBar();
     return;
   }
@@ -255,6 +284,7 @@ export function renderLibrary() {
     clear(list);
     $('#loadMoreWrap').hidden = true;
     renderBulkBar();
+    setLayout(view);
     return;
   }
   empty.hidden = true;
@@ -262,8 +292,39 @@ export function renderLibrary() {
   replace(grid, rows.map((v) => buildCard(v)));
   replace(list, rows.map((v) => buildRow(v)));
   $('#loadMoreWrap').hidden = rows.length >= total;
-  setLayout(lib.view || 'grid');
+  setLayout(view);
   renderBulkBar();
+}
+
+/**
+ * 画分组模式。
+ *
+ * ⚠️ 这里踩过一个让**整页白屏**的坑，修法值得记住：
+ *
+ * 原来这段是"无条件把分段渲染进 `#libGrid`，只按 view 选卡片/行的形状"，
+ * 然后 `setLayout` 再把 `#libGrid` 藏起来（因为当前是列表视图）。
+ * 结果两个入口都是白屏：
+ *   · 先点「列表」再开分组 → 分段画进了被隐藏的 #libGrid
+ *   · 先开分组再点「列表」→ 布局按钮只切 hidden、不重绘，同样白屏
+ * 而**所有测试都在默认的网格视图下**，270 项全绿也挡不住 ——
+ * 是独立评审用 DOM 探针实测才发现的。
+ *
+ * 现在容器在最上面按视图选一次（`grid` / `list` 只有一个是真节点），
+ * 分段内部自己决定画卡片还是画行，`setLayout` 只负责切显隐。
+ */
+function renderGrouped(groups, view) {
+  const grid = $('#libGrid');
+  const list = $('#libList');
+  const { grid: gridTarget, list: listTarget } = containersFor(view);
+
+  if (gridTarget) {
+    replace(grid, groups.map((g) => buildGroup(g, 'grid')));
+    replace(list, []);
+  } else {
+    replace(list, groups.map((g) => buildGroup(g, 'list')));
+    replace(grid, []);
+  }
+  setLayout(view);
 }
 
 /** 一个分组段：可折叠的标题 + 内容 */
