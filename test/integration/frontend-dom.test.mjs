@@ -1836,6 +1836,41 @@ test('队列：点「清空已完成记录」会弹确认框，并说清"文件�
   } finally { dom.restore(); }
 });
 
+test('队列：确认框必须写明**要删多少条**（用户被这一条坑过）', async () => {
+  /**
+   * 出过事故：库里积了两百多条已完成记录，确认框只写"清空列表里的记录"，
+   * 点下去全没了。所以这里钉住：**条数必须出现在标题和按钮上**。
+   */
+  const { dom } = await bootFrontend({
+    responses: fakeResponses({ queue: { counts: { done: 231, failed: 6, paused: 0, canceled: 2 } } }),
+  });
+  try {
+    globalThis.document.getElementById('btnClearDone').click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const box = globalThis.document.querySelector('#modal .dialog');
+    const text = box.textContent;
+    // done 231 + canceled 2 = 233
+    assert.match(text, /233/, `标题/正文要写明条数（231+2=233），实际：${text}`);
+    assert.match(text, /清空 233 条已完成记录/, '标题要说清是"清空 N 条"');
+    const primary = box.querySelector('.dialog-actions .btn-primary');
+    assert.match(primary.textContent, /233/, '按钮上也要带数字');
+  } finally { dom.restore(); }
+});
+
+test('队列：没有已完成记录时不硬编数字（文案退回通用说法）', async () => {
+  const { dom } = await bootFrontend({
+    responses: fakeResponses({ queue: { counts: { done: 0, failed: 0, paused: 0, canceled: 0 } } }),
+  });
+  try {
+    globalThis.document.getElementById('btnClearDone').click();
+    await new Promise((r) => setTimeout(r, 60));
+    const text = globalThis.document.querySelector('#modal .dialog').textContent;
+    assert.ok(!/0 条/.test(text), `不该出现"0 条"这种没意义的数字，实际：${text}`);
+    assert.match(text, /文件都会保留/);
+  } finally { dom.restore(); }
+});
+
 test('队列：确认「清空记录」后发 action=clearFinished', async () => {
   const { dom } = await bootFrontend({
     responses: {

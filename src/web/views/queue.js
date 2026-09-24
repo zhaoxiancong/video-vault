@@ -37,13 +37,26 @@ export function initQueueView({ onPlay }) {
     const action = btn.dataset.bulk;
 
     if (action === 'clearFinished') {
-      // 说清"只清记录、不动文件"——用户最怕的就是误删视频
+      /**
+       * ⚠️ 必须**先说清要删多少条**。
+       *
+       * 出过事故：库里积了两百多条已完成记录，确认框只写着"清空列表里的记录"，
+       * 用户点下去就全没了（文件还在，但记录要重建才有）。
+       * 一句话说不清数量的破坏性操作，等于没说 —— 把条数摆出来，
+       * 用户才有机会意识到"这么多条？我先筛一筛"。
+       */
+      const c = state.queue && state.queue.counts ? state.queue.counts : {};
+      const n = (Number(c.done) || 0) + (Number(c.canceled) || 0);
+      const body = n
+        ? `这 ${n} 条已完成的记录会从列表里删掉，磁盘上的视频文件都会保留。`
+          + '\n（想只删一部分，先用搜索/筛选缩小范围，或去「我的库」勾选后批量删除。）'
+        : '这只会清掉列表里的记录，磁盘上的视频文件都会保留。';
       const pick = await confirmDialog({
-        title: '清空已完成记录',
-        body: '这只会清掉列表里的记录，磁盘上的视频文件都会保留。',
+        title: n ? `清空 ${n} 条已完成记录？` : '清空已完成记录',
+        body,
         actions: [
           { label: '取消', value: null },
-          { label: '清空记录（保留文件）', value: 'go', primary: true },
+          { label: n ? `清空这 ${n} 条（保留文件）` : '清空记录（保留文件）', value: 'go', primary: true },
         ],
       });
       if (pick !== 'go') return;
