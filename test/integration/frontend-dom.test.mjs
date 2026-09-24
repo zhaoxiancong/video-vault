@@ -1167,6 +1167,25 @@ test('库页多选：换筛选条件会清空多选（避免"选中的东西看�
   } finally { dom.restore(); }
 });
 
+test('库页多选：点「刷新」也会清空选中（reload 自己负责清，评审 Minor）', async () => {
+  const { dom } = await bootMulti();
+  try {
+    await tick(0);
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /已选 1 条/);
+
+    /**
+     * 这条盯的是"清选中放在 reload 里，而不是只放在筛选控件的回调里"。
+     * 刷新按钮不走任何筛选回调 —— 如果清选中的逻辑只写在那些回调里，
+     * 这里就会留着上一次的选中，批量条还写着"已选 1 条"。
+     */
+    globalThis.document.getElementById('btnRefresh').click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /未选中/,
+      '刷新之后不该还留着上次的选中状态');
+  } finally { dom.restore(); }
+});
+
 test('库页多选：分组模式也能勾选（勾选框在分组内容里）', async () => {
   const { dom } = await bootFrontend({
     responses: {
@@ -1272,6 +1291,97 @@ test('分组管理：删除时必须弹确认框，且默认选项是"只解散"
 
     // 还没确认，所以不该发删除请求
     assert.equal(dom.calls.filter((c) => c.method === 'DELETE').length, 0, '确认前不该删');
+  } finally { dom.restore(); }
+});
+
+test('分组管理：选「删库记录」要**再确认一次**，并说明会波及其它分组（评审 I2）', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnManageGroups').click();
+    await new Promise((r) => setTimeout(r, 30));
+    // 「待看」那一组有 3 条
+    [...globalThis.document.querySelectorAll('#modal .gm-row')][0]
+      .querySelectorAll('button').find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 第一次确认里选危险的那个
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /库记录/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 40));
+
+    // 现在应当出现**第二次**确认
+    const box = globalThis.document.querySelector('#modal .dialog');
+    assert.ok(box, '应当弹出第二次确认');
+    const text = box.textContent;
+    assert.match(text, /确认删除这 3 条/, `第二次确认要说清删几条，实际：${text}`);
+    assert.match(text, /所有分组里消失/, `要说明会波及其它分组，实际：${text}`);
+    assert.match(text, /不能撤销/, '要说明不可逆');
+
+    // 默认（primary）必须是"我再想想"，不能默认就删
+    const primary = box.querySelector('.dialog-actions .btn-primary');
+    assert.match(primary.textContent, /再想想/, '第二次确认的默认必须是放弃');
+
+    assert.equal(dom.calls.filter((c) => c.method === 'DELETE').length, 0,
+      '第二次确认之前绝不能发删除请求');
+  } finally { dom.restore(); }
+});
+
+test('分组管理：第二次确认里点「我再想想」，什么都不删', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnManageGroups').click();
+    await new Promise((r) => setTimeout(r, 30));
+    [...globalThis.document.querySelectorAll('#modal .gm-row')][0]
+      .querySelectorAll('button').find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 30));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /库记录/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 40));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /再想想/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    assert.equal(dom.calls.filter((c) => c.method === 'DELETE').length, 0, '放弃了就不该删');
+  } finally { dom.restore(); }
+});
+
+test('分组管理：两次都确认后才真的删，且 mode=purge', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnManageGroups').click();
+    await new Promise((r) => setTimeout(r, 30));
+    [...globalThis.document.querySelectorAll('#modal .gm-row')][0]
+      .querySelectorAll('button').find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 30));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /库记录/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 40));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /确认删除这/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    const hit = dom.calls.find((c) => c.method === 'DELETE' && c.url.includes('/api/groups/1'));
+    assert.ok(hit, `两次确认后才该发删除请求。实际：${dom.calls.filter((c) => c.method === 'DELETE').map((c) => c.url).join(' | ')}`);
+    assert.match(hit.url, /mode=purge/);
+  } finally { dom.restore(); }
+});
+
+test('分组管理：空分组选 purge 不弹第二次（没什么可删的）', async () => {
+  const { dom } = await bootManage();
+  try {
+    globalThis.document.getElementById('btnManageGroups').click();
+    await new Promise((r) => setTimeout(r, 30));
+    // 「空的」那一组 count=0
+    [...globalThis.document.querySelectorAll('#modal .gm-row')][1]
+      .querySelectorAll('button').find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 30));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /库记录/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const hit = dom.calls.find((c) => c.method === 'DELETE');
+    assert.ok(hit, '空分组不该再拦一道 —— 没什么可删的，直接执行');
+    assert.match(hit.url, /mode=purge/);
   } finally { dom.restore(); }
 });
 
@@ -1663,5 +1773,256 @@ test('全选 ③：点分组勾选框不该顺手把这一组折叠（冒泡要�
       'grp-head 整条是折叠开关，勾选框必须阻止冒泡 —— 否则一点全选就把这组折起来');
     assert.match(globalThis.document.getElementById('libBulkBar').textContent, /已选 2 条/,
       '同时选中还是生效的');
+  } finally { dom.restore(); }
+});
+
+// ---------------------------------------------------------------- 批量删除
+
+/** 两条带文件的记录 + 批量删除接口 */
+function delResponses(overrides = {}) {
+  const row = (id, size) => ({
+    id, url: `https://x/${id}`, title: `t${id}`, status: 'done',
+    created_at: '2026-09-22 10:00', file_path: `D:\\dl\\${id}.mp4`, starred: false,
+    file_size: size,
+  });
+  // 默认给 5 条都加载出来，这样「全选」的选中集合是确定的 [1..5]
+  const rows = [row(1, 1024 * 1024), row(2, 2 * 1024 * 1024), row(3, 1024), row(4, 1024), row(5, 1024)];
+  return {
+    ...fakeResponses(),
+    'GET /api/library': { total: rows.length, rows },
+    'GET /api/groups': { groups: [] },
+    'GET /api/library/ids': { ids: rows.map((r) => r.id), total: rows.length, count: rows.length, cap: 2000, truncated: false },
+    'POST /api/videos/bulk-delete': { deleted: 5, removedFiles: 0, freedBytes: 0, errors: [] },
+    ...overrides,
+  };
+}
+
+async function bootDelete(overrides) {
+  const booted = await bootFrontend({ responses: delResponses(overrides) });
+  globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+  await new Promise((r) => setTimeout(r, 50));
+  const m = globalThis.document.getElementById('libMulti');
+  m.checked = true;
+  m.dispatchEvent(new globalThis.Event('change'));
+  await new Promise((r) => setTimeout(r, 30));
+  return booted;
+}
+
+test('批量删除：批量条上有「删除」按钮', async () => {
+  const { dom } = await bootDelete();
+  try {
+    const bar = globalThis.document.getElementById('libBulkBar');
+    const btn = [...bar.querySelectorAll('button')].find((b) => b.textContent === '删除');
+    assert.ok(btn, `批量条上应当有删除按钮，实际：${bar.textContent}`);
+    assert.ok(btn.classList.contains('btn-danger'), '危险操作该用 danger 样式');
+  } finally { dom.restore(); }
+});
+
+test('批量删除：点删除先弹确认框，**默认是安全的"保留文件"**', async () => {
+  const { dom } = await bootDelete();
+  try {
+    await tick(0);
+    await tick(1);
+    [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const box = globalThis.document.querySelector('#modal .dialog');
+    assert.ok(box, '应当弹出确认框');
+    const labels = [...box.querySelectorAll('.dialog-actions button')].map((b) => b.textContent);
+    assert.ok(labels.some((l) => /保留文件/.test(l)), `要有"保留文件"选项，实际：${labels.join(' | ')}`);
+    assert.ok(labels.some((l) => /永久删除/.test(l)), '要有"永久删除"选项');
+
+    // 默认（primary）必须是保留文件那一边
+    const primary = box.querySelector('.dialog-actions .btn-primary');
+    assert.match(primary.textContent, /保留文件/, '默认必须是安全的"保留文件"');
+
+    // 弹框要说清删几条、涉及多少文件与空间
+    const text = box.textContent;
+    assert.match(text, /2 条/, `要说清删几条，实际：${text}`);
+    assert.match(text, /2 条有本地文件/, '要说清有几条带文件');
+    assert.match(text, /3\.0 MB|3 MB/, `要报出合计空间，实际：${text}`);
+
+    assert.equal(dom.calls.filter((c) => c.method === 'POST' && c.url.includes('bulk-delete')).length, 0,
+      '还没确认就不该发请求');
+  } finally { dom.restore(); }
+});
+
+test('批量删除：选「保留文件」时 deleteFiles=false', async () => {
+  const { dom } = await bootDelete();
+  try {
+    /**
+     * ⚠️ 用工具栏的「全选」把选中集合变成**确定的** [1..5]。
+     *    直接 `tick(0)` 的话选中集合会受上一条用例残留影响
+     *    （`picked` 是模块级状态，垫片不重置它）—— 断言 ids 就成了考验测试顺序。
+     */
+    const all = globalThis.document.getElementById('libPickAll');
+    all.checked = true;
+    all.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 60));
+
+    [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 60));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /保留文件/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('bulk-delete'));
+    assert.ok(hit, `要发批量删除请求。实际：${dom.calls.map((c) => c.method + ' ' + c.url.split('?')[0]).join(' | ')}`);
+    assert.equal(hit.body.deleteFiles, false, '保留文件那档必须明确传 false');
+    assert.deepEqual(hit.body.ids.slice().sort((a, b) => a - b), [1, 2, 3, 4, 5]);
+  } finally { dom.restore(); }
+});
+
+test('批量删除：选「永久删除」时 deleteFiles=true', async () => {
+  const { dom } = await bootDelete();
+  try {
+    await tick(0);
+    [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 60));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /永久删除/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('bulk-delete'));
+    assert.equal(hit.body.deleteFiles, true, '永久删除那档必须传 true');
+  } finally { dom.restore(); }
+});
+
+test('批量删除：点「取消」什么都不发', async () => {
+  const { dom } = await bootDelete();
+  try {
+    await tick(0);
+    [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 60));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => b.textContent === '取消').click();
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(dom.calls.filter((c) => c.url.includes('bulk-delete')).length, 0, '取消不该发请求');
+  } finally { dom.restore(); }
+});
+
+test('批量删除：选中里有还没加载出来的，弹框要如实说明', async () => {
+  const { dom } = await bootFrontend({
+    responses: delResponses({
+      // 筛到 5 条但只加载 2 条
+      'GET /api/library': {
+        total: 5,
+        rows: [1, 2].map((id) => ({
+          id, url: `https://x/${id}`, title: `t${id}`, status: 'done',
+          created_at: '2026-09-22 10:00', file_path: `D:\\dl\\${id}.mp4`, starred: false, file_size: 1024,
+        })),
+      },
+      'GET /api/library/ids': { ids: [1, 2, 3, 4, 5], total: 5, count: 5, cap: 2000, truncated: false },
+    }),
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 50));
+    const m = globalThis.document.getElementById('libMulti');
+    m.checked = true;
+    m.dispatchEvent(new globalThis.Event('change'));
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 用「全选全部」把 5 条都选中（含没加载的 3 条）
+    [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => /全选全部/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const text = globalThis.document.querySelector('#modal .dialog').textContent;
+    assert.match(text, /5 条/, `条数要以选中数为准，实际：${text}`);
+    assert.match(text, /还没加载出来/, `未加载的要如实说明，实际：${text}`);
+
+    // 确认时要把 5 个 id 都带上（不能只删看得见的那 2 条）
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /保留文件/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 80));
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('bulk-delete'));
+    assert.deepEqual(hit.body.ids.slice().sort((x, y) => x - y), [1, 2, 3, 4, 5],
+      '含没加载的那 3 条也要一起删');
+  } finally { dom.restore(); }
+});
+
+test('批量删除：删除后清空选中并刷新列表', async () => {
+  const { dom } = await bootDelete();
+  try {
+    await tick(0);
+    [...globalThis.document.querySelectorAll('#libBulkBar button')]
+      .find((b) => b.textContent === '删除').click();
+    await new Promise((r) => setTimeout(r, 60));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /保留文件/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 120));
+
+    assert.match(globalThis.document.getElementById('libBulkBar').textContent, /未选中/,
+      '删完要把选中清掉');
+    const libCalls = dom.calls.filter((c) => c.url.includes('/api/library?')).length;
+    assert.ok(libCalls >= 2, `删完应当重新拉一次列表（实际 ${libCalls} 次）`);
+  } finally { dom.restore(); }
+});
+
+// ---------------------------------------------------------------- 键盘可达性（评审 Minor）
+
+test('分组标题可以用键盘折叠（role=button + Enter / Space）', async () => {
+  const MK = 'KeyboardTest';
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'GET /api/groups': { groups: [] },
+      'GET /api/library/ids': { ids: [1], total: 1, count: 1, cap: 2000, truncated: false },
+      'GET /api/library/grouped': (req) => ({
+        by: req.params.get('by') || 'site', total: 1, shown: 1, truncated: false, cap: 2000,
+        groups: [{ key: MK, id: null, name: MK, color: null, count: 1, rows: [
+          { id: 1, url: 'https://x/1', title: 'a', status: 'done', created_at: '2026-09-22 10:00', file_path: 'D:\\1.mp4', starred: false },
+        ] }],
+      }),
+    },
+  });
+  try {
+    globalThis.document.querySelectorAll('.tab').find((t) => t.dataset.view === 'library').click();
+    await new Promise((r) => setTimeout(r, 40));
+    await chooseGroupBy('site');
+
+    const headOf = () => [...globalThis.document.querySelectorAll('#libGrid .grp-head')]
+      .find((h) => h.dataset.grp === MK);
+    const bodyHidden = () => {
+      const g = [...globalThis.document.querySelectorAll('#libGrid .grp')]
+        .find((x) => x.querySelector('.grp-head').dataset.grp === MK);
+      return g.querySelector('.grp-body').hidden;
+    };
+
+    // 先确认可访问性属性在
+    assert.equal(headOf().getAttribute('role'), 'button', '要有 role=button');
+    assert.equal(headOf().getAttribute('tabindex'), '0', '要能 Tab 到');
+    assert.equal(headOf().getAttribute('aria-expanded'), 'true', '展开时 aria-expanded=true');
+
+    // Enter 折叠
+    assert.equal(bodyHidden(), false);
+    const head = headOf();
+    head.dispatchEvent(new globalThis.Event('keydown', { key: 'Enter', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(bodyHidden(), true, 'Enter 应当能折叠');
+    assert.equal(headOf().getAttribute('aria-expanded'), 'false', '折叠后 aria-expanded=false');
+
+    // Space 展开（并且不该把页面滚走）
+    const head2 = headOf();
+    /**
+     * ⚠️ 别去 mock `ev.preventDefault` —— `dispatchEvent` 会**造一个新对象**
+     *    并赋上它自己的 `preventDefault`，mock 会被覆盖掉（第一版就是这么假失败的）。
+     *    垫片里真实记录了 `defaultPrevented`，查它才是查真相。
+     */
+    const ev = new globalThis.Event('keydown', { key: ' ', bubbles: true, cancelable: true });
+    head2.dispatchEvent(ev);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(bodyHidden(), false, 'Space 应当能展开');
+    assert.equal(ev.defaultPrevented, true,
+      'Space 要 preventDefault，否则会顺手滚动页面');
   } finally { dom.restore(); }
 });

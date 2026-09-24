@@ -330,6 +330,19 @@ async function main() {
       await sleep(700);
       await shot('shot-library-select-all');
 
+      // 批量删除的确认框（两个选项 + 会删几个文件/多少空间）
+      await evalJs(`
+        (() => {
+          const btn = [...document.querySelectorAll('#libBulkBar button')]
+            .find((b) => b.textContent === '删除');
+          if (btn) btn.click();
+          return Boolean(btn);
+        })()
+      `);
+      await sleep(800);
+      await shot('shot-library-bulk-delete');
+      await evalJs(`(() => { const m = document.getElementById('modal'); if (m) m.hidden = true; return true; })()`);
+
       // 分组级的全选：切到按站点分段，看每个分段标题上的勾选框
       await evalJs(`
         (() => {

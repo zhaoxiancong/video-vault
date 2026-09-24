@@ -832,11 +832,27 @@ function createDatabase(config, options = {}) {
 
   /**
    * 分组名归一化：去首尾空白 + 合并内部空白。名字本身保留这份清理后的样子。
-   *
-   * ⚠️ 查重另外用 `COLLATE NOCASE`（大小写不敏感）。只差一个空格或大小写的两个名字
-   * 在界面上看起来一模一样，用户会分不清点哪个 —— 所以都算重名，返回 409。
    */
   const normGroupName = (name) => String(name == null ? '' : name).trim().replace(/\s+/g, ' ');
+
+  /**
+   * 查重用的键：在归一化基础上再做**大小写与 Unicode 折叠**。
+   *
+   * ⚠️ 不能用 SQL 的 `COLLATE NOCASE` —— 它**只折叠 ASCII**。
+   *    于是 `Ä`/`ä`、`É`/`é`、全角/半角这些会绕过查重，
+   *    建出两个**肉眼一模一样**的分组，用户分不清点哪个。
+   *    `toLowerCase()` + `normalize('NFKC')` 覆盖这些情况
+   *    （NFKC 顺带把全角 `Ａ` 折成 `A`）。
+   *
+   * 分组数量是个位数到几十，放在 JS 里比对完全够用，不必为此加一列。
+   */
+  const groupKey = (name) => normGroupName(name).normalize('NFKC').toLowerCase();
+
+  /** 找一个与给定名字"看起来一样"的已有分组（不含 excludeId） */
+  function findGroupByName(name, excludeId = null) {
+    const key = groupKey(name);
+    return listGroups().find((g) => g.id !== excludeId && groupKey(g.name) === key) || null;
+  }
 
   function groupOut(row) {
     return {
@@ -867,7 +883,7 @@ function createDatabase(config, options = {}) {
     if (clean.length > 40) {
       throw new ValidationError('分组名太长了（最多 40 个字符）', { hint: '短一点更好认。' });
     }
-    const dup = db.prepare('SELECT id FROM groups WHERE name = ? COLLATE NOCASE').get(clean);
+    const dup = findGroupByName(clean);
     if (dup) {
       throw new ValidationError(`已经有叫「${clean}」的分组了`, {
         status: 409, hint: '换一个名字，或者直接用现有的那个。',
@@ -891,8 +907,7 @@ function createDatabase(config, options = {}) {
       const clean = normGroupName(name);
       if (!clean) throw new ValidationError('分组名不能为空', { hint: '给它起个名字。' });
       if (clean.length > 40) throw new ValidationError('分组名太长了（最多 40 个字符）');
-      const dup = db.prepare('SELECT id FROM groups WHERE name = ? COLLATE NOCASE AND id <> ?')
-        .get(clean, gid);
+      const dup = findGroupByName(clean, gid);
       if (dup) {
         throw new ValidationError(`已经有叫「${clean}」的分组了`, { status: 409, hint: '换一个名字。' });
       }

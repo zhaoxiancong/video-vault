@@ -9,6 +9,7 @@
 const { json, readJsonBody } = require('../router');
 const { slimHistoryRow, slimPage } = require('../views');
 const { ValidationError, NotFoundError } = require('../../domain/errors');
+const { validate, R } = require('../validate');
 
 /** 允许的排序方式（写死：不接受前端传任意 SQL 片段） */
 const SORTS = ['created_desc', 'created_asc', 'title_asc', 'size_desc', 'duration_desc'];
@@ -38,7 +39,7 @@ function parseGroupId(raw) {
 }
 
 function register(router, ctx) {
-  const { repo, scheduler, downloader, config, migrations, dupMerged } = ctx;
+  const { repo, scheduler, downloader, config, migrations, dupMerged, broadcast } = ctx;
 
   // ---------------------------------------------------------------- 引擎自检
 
@@ -198,24 +199,74 @@ function register(router, ctx) {
 
   // ---------------------------------------------------------------- 分组 CRUD
 
+  /**
+   * 允许的分组颜色。**与 `styles.css` 里那 5 个 `.c-*` 类一一对应** ——
+   * 后端只存 key，前端拿 key 拼类名。加了这里就必须同步加样式，
+   * 否则分组颜色会静默变成灰色（`check-classes.js` 对 `c-` 前缀放行，
+   * 抓不到这种"后端能存但样式没有"的组合）。
+   */
+  const GROUP_COLORS = ['amber', 'blue', 'green', 'purple', 'red'];
+
+  /**
+   * 保留分组名。「未分组」是 `by=group` 下**合成出来的那一段**的名字 ——
+   * 如果允许用户建一个真的叫「未分组」的分组，界面上会同时出现两个同名段
+   * （一个是他的、一个是合成的），肉眼分不清哪个是哪个。
+   */
+  const RESERVED_GROUP_NAMES = ['未分组'];
+
+  function assertGroupNameAllowed(name) {
+    const clean = String(name == null ? '' : name).trim();
+    if (RESERVED_GROUP_NAMES.includes(clean)) {
+      throw new ValidationError(`「${clean}」是系统保留的名字`, {
+        hint: '它是"按分组分段"时自动生成的那一段的名字，换一个吧。',
+      });
+    }
+  }
+
   router.get('/api/groups', (req, res) => {
     return json(res, 200, { groups: repo.listGroups() });
   });
 
   router.post('/api/groups', async (req, res) => {
     const body = await readJsonBody(req);
-    const name = body && typeof body.name === 'string' ? body.name : '';
-    const color = body && typeof body.color === 'string' ? body.color : undefined;
-    return json(res, 200, repo.createGroup({ name, color }));
+    const { name, color } = validate(body, {
+      name: { type: 'string', required: true, maxLength: 40, hint: '分组名不能为空' },
+      color: R.oneOf(GROUP_COLORS, `颜色可选：${GROUP_COLORS.join(' / ')}`),
+    });
+    assertGroupNameAllowed(name);
+    const out = repo.createGroup({ name, color: color || GROUP_COLORS[0] });
+    broadcast('library', { changed: true });
+    return json(res, 200, out);
   });
 
   router.patch('/api/groups/:id', async (req, res, p) => {
     const body = await readJsonBody(req);
-    const out = repo.updateGroup(Number(p.id), {
-      name: body && body.name !== undefined ? String(body.name) : undefined,
-      color: body && body.color !== undefined ? String(body.color) : undefined,
-    });
+    /**
+     * ⚠️ 这里用 `checkOne` 逐字段处理，是因为**两个字段都是可选的**，
+     *    而 `validate` 对"传了但为 null"的处理是走类型校验 → `String(null)` 会
+     *    把名字变成字面量 "null"。所以显式判 `!= null`：
+     *    只有**真的给了值**才改，给 null/undefined 一律视为"不改这个字段"。
+     */
+    const patch = {};
+    if (body && body.name != null) {
+      const name = String(body.name).trim();
+      if (!name) throw new ValidationError('分组名不能为空', { hint: '给它起个名字。' });
+      if (name.length > 40) throw new ValidationError('分组名太长了（最多 40 个字符）');
+      assertGroupNameAllowed(name);
+      patch.name = name;
+    }
+    if (body && body.color != null) {
+      const color = String(body.color);
+      if (!GROUP_COLORS.includes(color)) {
+        throw new ValidationError(`不认得的颜色：${color}`, {
+          hint: `颜色可选：${GROUP_COLORS.join(' / ')}`,
+        });
+      }
+      patch.color = color;
+    }
+    const out = repo.updateGroup(Number(p.id), patch);
     if (!out) throw new NotFoundError('找不到这个分组', { hint: '它可能已经被删了，刷新一下。' });
+    broadcast('library', { changed: true });
     return json(res, 200, out);
   });
 
@@ -228,6 +279,7 @@ function register(router, ctx) {
     }
     const out = repo.deleteGroup(Number(p.id), { mode });
     if (!out) throw new NotFoundError('找不到这个分组');
+    broadcast('library', { changed: true });
     return json(res, 200, out);
   });
 

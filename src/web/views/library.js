@@ -119,6 +119,16 @@ export function initLibraryView({ onPlay }) {
     toggleGroup(head.dataset.grp);
   });
 
+  /** 键盘：Enter / Space 折叠（配合 grp-head 上的 role=button + tabindex） */
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const head = e.target && e.target.closest ? e.target.closest('[data-grp]') : null;
+    if (!head) return;
+    // Space 默认会滚动页面，得拦一下，否则"按空格折叠"会顺手把页面滚走
+    if (e.preventDefault) e.preventDefault();
+    toggleGroup(head.dataset.grp);
+  });
+
   $('#btnNewGroup').addEventListener('click', () => showGroupEditor(null));
   $('#btnManageGroups').addEventListener('click', () => showGroupManager());
 }
@@ -143,6 +153,16 @@ export async function reload({ reset = true } = {}) {
     q: lib.q || '', status: lib.status || '', site: lib.site || '',
     uploader: lib.uploader || '', sort: lib.sort || 'created_desc',
   };
+
+  /**
+   * 重置式刷新时**清掉选中**。
+   *
+   * 放在这里而不是只放在筛选控件的回调里：`reload({reset:true})` 是"数据换了"的
+   * 统一信号，批量删除之后、别处删了记录之后也走它。不清的话批量条还写着
+   * "已选 3 条"，再点一次收藏会打到已经不存在的 id 上（后端能容忍，
+   * 但提示会是"影响了 0 条"，很让人困惑）。
+   */
+  if (reset) clearPicked();
 
   try {
     /**
@@ -417,7 +437,19 @@ function buildGroup(g, view) {
   }
 
   return el('div', { class: 'grp' }, [
-    el('div', { class: 'grp-head', dataset: { grp: g.key } }, [
+    el('div', {
+      class: 'grp-head',
+      dataset: { grp: g.key },
+      /**
+       * 键盘可达性（评审 Minor）：原来它是个可点的 `div`，纯键盘用户折叠不了。
+       * 加 `role=button` + `tabindex` + `aria-expanded`，并在 document 的委托里
+       * 处理 Enter / Space（见 `initLibraryView`）。
+       */
+      role: 'button',
+      tabindex: '0',
+      'aria-expanded': String(!collapsed),
+      title: collapsed ? '展开这一组' : '收起这一组',
+    }, [
       el('span', { class: 'grp-caret', text: collapsed ? '▶' : '▼' }),
       g.color ? el('span', { class: `grp-dot c-${g.color}` }) : null,
       el('span', { class: 'grp-name', text: g.name }),
@@ -534,12 +566,78 @@ function renderBulkBar() {
     ...selectButtons,
     el('button', { class: 'btn btn-sm', type: 'button', text: '收藏', onclick: () => bulkStar('star') }),
     el('button', { class: 'btn btn-sm', type: 'button', text: '取消收藏', onclick: () => bulkStar('unstar') }),
+    el('button', { class: 'btn btn-sm btn-danger', type: 'button', text: '删除', onclick: () => bulkDelete() }),
     el('button', {
       class: 'btn btn-sm', type: 'button', text: '取消选择',
       onclick: () => { clearPicked(); renderLibrary(); },
     }),
   ]);
   bar.hidden = false;
+}
+
+/** 选中的那些视频（只能看到**已加载**的那部分，分组模式也认） */
+function pickedVideos() {
+  return visibleRows().filter((v) => picked.has(v.id));
+}
+
+/**
+ * 批量删除。
+ *
+ * ⚠️ 这是**不可逆**操作，所以：
+ *   · 弹框里先把"选中多少条、其中多少条有文件、合计多少空间"摆出来 ——
+ *     用户点之前应该知道自己在删什么。
+ *   · **默认选项是"只从列表删掉"**（安全的那一边）；连文件一起删是标红的第二选项，
+ *     文案里直接写明"永久删除"。
+ *
+ * 注意：选中的可能包含**还没加载出来的**（用了「全选全部」），
+ * `pickedVideos()` 只看得到已加载的那部分 —— 所以条数以 `picked.size` 为准，
+ * 并且如实告诉用户"有 N 条还没加载出来，空间没算进去"。
+ */
+async function bulkDelete() {
+  const total = picked.size;
+  if (!total) { toast('还没有选中任何视频'); return; }
+
+  const loaded = pickedVideos();
+  const withFile = loaded.filter((v) => v.file_path);
+  const bytes = withFile.reduce((a, v) => a + (v.file_size || 0), 0);
+  const notLoaded = total - loaded.length;
+
+  const lines = [`选中的 ${total} 条会从库里删掉。`];
+  if (withFile.length) {
+    lines.push(`其中 ${withFile.length} 条有本地文件${bytes ? `，合计 ${fmtBytes(bytes)}` : ''}。`);
+  }
+  if (notLoaded > 0) {
+    lines.push(`（有 ${notLoaded} 条还没加载出来，文件大小没算进去。）`);
+  }
+
+  const pick = await confirmDialog({
+    title: `删除选中的 ${total} 条`,
+    body: lines.join('\n'),
+    actions: [
+      { label: '取消', value: null },
+      { label: '只从列表删掉（保留文件）', value: 'keep', primary: true },
+      { label: '连磁盘文件一起永久删除', value: 'purge', tone: 'danger' },
+    ],
+  });
+  if (!pick) return;
+
+  try {
+    const r = await api('POST', '/api/videos/bulk-delete', {
+      ids: [...picked],
+      deleteFiles: pick === 'purge',
+    });
+    const bits = [`已删除 ${r.deleted} 条`];
+    if (r.removedFiles) bits.push(`清理 ${r.removedFiles} 个文件`);
+    if (r.freedBytes) bits.push(`释放 ${fmtBytes(r.freedBytes)}`);
+    const skipped = (r.errors || []).length;
+    if (skipped) bits.push(`${skipped} 条被跳过`);
+    toast(bits.join(' · '), skipped ? 'warn' : '');
+    clearPicked();
+    await reload({ reset: true });
+    await loadGroups();
+  } catch (err) {
+    toast(formatError(err), 'bad');
+  }
 }
 
 async function bulkGroupAdd(groupId) {
@@ -904,6 +1002,29 @@ async function confirmDeleteGroup(g) {
     ],
   });
   if (!pick) return;
+
+  /**
+   * ⚠️ `purge` 要**再确认一次**（spec §3.2/§5.4 两处都要求了）。
+   *
+   * 它删的是**库记录**，而且是不可逆的，还会**波及别的分组** ——
+   * 多对多之下，这些视频可能同时属于其它分组，删掉记录它们会从那边一起消失。
+   * 第一版把这一步省了（只做一次确认框），评审指出了这个偏离。
+   */
+  if (pick === 'purge' && g.count > 0) {
+    const sure = await confirmDialog({
+      title: `确认删除这 ${g.count} 条库记录？`,
+      body: [
+        `删掉之后，这 ${g.count} 条视频会从所有分组里消失（不只是「${g.name}」）。`,
+        '磁盘上的视频文件会保留。这个操作不能撤销。',
+      ].join('\n'),
+      actions: [
+        { label: '我再想想', value: null, primary: true },
+        { label: `确认删除这 ${g.count} 条记录`, value: 'purge', tone: 'danger' },
+      ],
+    });
+    if (sure !== 'purge') return;
+  }
+
   try {
     const r = await api('DELETE', `/api/groups/${g.id}?mode=${pick}`);
     toast(pick === 'purge'

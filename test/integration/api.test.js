@@ -1107,3 +1107,223 @@ test('取筛选下的全部 id：groupId 非法时同样 400（与列表口径�
     assert.equal(r.status, 400);
   } finally { await s.cleanup(); }
 });
+
+// ---------------------------------------------------------------- 批量删除
+
+/** 造一条带**真实文件**的记录（批量删除要真的碰磁盘，不能只改库） */
+function makeWithFiles(s, id, { bytes = 1024 } = {}) {
+  const file = path.join(s.tmp, 'downloads', `v${id}.mp4`);
+  const thumb = path.join(s.tmp, 'downloads', `v${id}.jpg`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, Buffer.alloc(bytes, 1));
+  fs.writeFileSync(thumb, Buffer.alloc(16, 2));
+  const v = s.app.repo.insertVideo({
+    url: `https://x/bulkdel/${id}`, title: `del ${id}`, status: 'done',
+    file_path: file, thumbnail_path: thumb, file_size: bytes,
+  });
+  return { id: v.id, file, thumb };
+}
+
+test('批量删除：只删记录时磁盘文件必须留着', async () => {
+  const s = await startApp();
+  try {
+    const a = makeWithFiles(s, 1);
+    const b = makeWithFiles(s, 2);
+
+    const r = await s.call('POST', '/api/videos/bulk-delete', {
+      ids: [a.id, b.id], deleteFiles: false,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.deleted, 2);
+    assert.equal(r.data.removedFiles, 0, '没要删文件就不该删');
+    assert.equal(r.data.freedBytes, 0);
+
+    assert.equal(s.app.repo.getVideo(a.id), null, '记录要没了');
+    assert.equal(s.app.repo.getVideo(b.id), null);
+    assert.ok(fs.existsSync(a.file), '⚠️ 文件必须留着');
+    assert.ok(fs.existsSync(b.file), '⚠️ 文件必须留着');
+    assert.ok(fs.existsSync(a.thumb), '封面也该留着');
+  } finally { await s.cleanup(); }
+});
+
+test('批量删除：要删文件时，文件与封面都删掉，并报出释放的字节数', async () => {
+  const s = await startApp();
+  try {
+    const a = makeWithFiles(s, 1, { bytes: 2048 });
+    const b = makeWithFiles(s, 2, { bytes: 4096 });
+
+    const r = await s.call('POST', '/api/videos/bulk-delete', {
+      ids: [a.id, b.id], deleteFiles: true,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.deleted, 2);
+    // ⚠️ removedFiles 数的是**文件个数**，不是视频条数：
+    //    每条有"视频文件 + 封面"两个，2 条 = 4 个文件。
+    //    （第一版测试断言成 2，那是把语义搞错了 —— 界面文案说的是"删除 N 个文件"。）
+    assert.equal(r.data.removedFiles, 4, '视频文件 + 封面，各 2 个');
+    assert.equal(r.data.freedBytes, 2048 + 4096, '释放空间只算视频文件，不含封面');
+    assert.ok(!fs.existsSync(a.file), '文件要没了');
+    assert.ok(!fs.existsSync(b.file));
+    assert.ok(!fs.existsSync(a.thumb), '封面也该删');
+  } finally { await s.cleanup(); }
+});
+
+test('批量删除：ids 里混有不存在的 id 时忽略并如实报数', async () => {
+  const s = await startApp();
+  try {
+    const a = makeWithFiles(s, 1);
+    const r = await s.call('POST', '/api/videos/bulk-delete', {
+      ids: [a.id, 999999], deleteFiles: false,
+    });
+    assert.equal(r.status, 200, '不能整体 500');
+    assert.equal(r.data.deleted, 1, '只删掉真实存在的那条');
+    assert.ok(r.data.errors.length >= 1, '要如实报告被跳过的 id');
+    assert.ok(r.data.errors[0].reason, 'errors 里要有可读的原因');
+  } finally { await s.cleanup(); }
+});
+
+test('批量删除：重复 id 只算一次（不能把删除数夸大）', async () => {
+  const s = await startApp();
+  try {
+    const a = makeWithFiles(s, 1);
+    const r = await s.call('POST', '/api/videos/bulk-delete', {
+      ids: [a.id, a.id, a.id], deleteFiles: false,
+    });
+    assert.equal(r.data.deleted, 1, '同一条给三次也只该删一次、只算一次');
+    assert.equal(r.data.removedFiles, 0);
+  } finally { await s.cleanup(); }
+});
+
+test('批量删除：不给 ids 或全是空时 400，且什么都没删', async () => {
+  const s = await startApp();
+  try {
+    const a = makeWithFiles(s, 1);
+    for (const body of [{ ids: [] }, {}, { ids: 'nope' }]) {
+      const r = await s.call('POST', '/api/videos/bulk-delete', { ...body, deleteFiles: true });
+      assert.equal(r.status, 400, `${JSON.stringify(body)} 应当 400`);
+    }
+    assert.ok(s.app.repo.getVideo(a.id), '记录还在');
+    assert.ok(fs.existsSync(a.file), '文件也在');
+  } finally { await s.cleanup(); }
+});
+
+test('批量删除：正在下载的任务要先取消掉（不能留下孤儿下载）', async () => {
+  const s = await startApp();
+  try {
+    /**
+     * ⚠️ 这里**故意直接往库里插** queued 记录，而不是走 POST /api/videos。
+     *
+     * 走 API 会真的去联网解析、真的开始下载（这个套件不该为了测删除而去下东西）。
+     * 直接插的话任务不在调度器的 `running` Map 里，于是 `cancel()` 走
+     * "未登记任务"那条分支 —— 照样能验证"删除会先把任务取消掉"这件事，
+     * 而且不碰网络。
+     */
+    const v = s.app.repo.insertVideo({
+      url: 'https://x/bulkdel/queued', title: '排队中', status: 'queued',
+    });
+
+    // 记一笔：删除时必须调过 cancel（这是"不留孤儿下载"的关键动作）
+    const cancelled = [];
+    const origCancel = s.app.scheduler.cancel;
+    s.app.scheduler.cancel = (id, opts) => { cancelled.push(id); return origCancel(id, opts); };
+
+    const r = await s.call('POST', '/api/videos/bulk-delete', { ids: [v.id], deleteFiles: false });
+    assert.equal(r.data.deleted, 1);
+    assert.deepEqual(cancelled, [v.id], '删除前必须先 cancel 掉这个任务');
+    assert.equal(s.app.repo.getVideo(v.id), null, '记录要没了');
+
+    // 等调度器那一轮异步 kick 跑完，免得它在测试收尾后才碰到已关闭的库
+    await new Promise((res) => setTimeout(res, 50));
+    const q = await s.call('GET', '/api/queue');
+    assert.ok(!(q.data.running || []).some((x) => x.id === v.id), '不该留在队列里');
+  } finally { await s.cleanup(); }
+});
+
+test('批量删除：没有 file_path 的记录也能删（只有记录没有文件）', async () => {
+  const s = await startApp();
+  try {
+    const v = s.app.repo.insertVideo({ url: 'https://x/nofile', title: '无文件', status: 'failed' });
+    const r = await s.call('POST', '/api/videos/bulk-delete', { ids: [v.id], deleteFiles: true });
+    assert.equal(r.data.deleted, 1, '没有文件的记录也该能删掉');
+    assert.equal(r.data.removedFiles, 0, '没有文件可删');
+    assert.equal(s.app.repo.getVideo(v.id), null);
+  } finally { await s.cleanup(); }
+});
+
+test('批量删除：file_path 指向的文件已经不在了，也不能报错', async () => {
+  const s = await startApp();
+  try {
+    const v = s.app.repo.insertVideo({
+      url: 'https://x/ghost', title: '文件没了', status: 'done',
+      file_path: path.join(s.tmp, 'downloads', 'not-there.mp4'),
+    });
+    const r = await s.call('POST', '/api/videos/bulk-delete', { ids: [v.id], deleteFiles: true });
+    assert.equal(r.status, 200, '文件不存在不该报错');
+    assert.equal(r.data.deleted, 1);
+    assert.equal(r.data.removedFiles, 0);
+  } finally { await s.cleanup(); }
+});
+
+// ---------------------------------------------------------------- 分组接口的入参校验（评审 Minor）
+
+test('分组校验：颜色只认预设的那几个，乱传要 400', async () => {
+  const s = await startApp();
+  try {
+    const bad = await s.call('POST', '/api/groups', { name: '怪色', color: '#ff0000' });
+    assert.equal(bad.status, 400, '不能把任意字符串当颜色存进去');
+    // validate 的 oneOf 把可选值写在 error 里（"只能是 a / b 之一"），hint 放的是"你给的是 X"
+    assert.match(String(bad.data.error), /amber/, `要列出可选颜色，实际：${JSON.stringify(bad.data)}`);
+    assert.match(String(bad.data.hint || ''), /#ff0000/, '要说清收到的是什么');
+
+    const ok = await s.call('POST', '/api/groups', { name: '正常色', color: 'blue' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.data.color, 'blue');
+
+    // 不传颜色时用默认色，不该报错
+    const dflt = await s.call('POST', '/api/groups', { name: '默认色' });
+    assert.equal(dflt.status, 200);
+    assert.equal(dflt.data.color, 'amber');
+  } finally { await s.cleanup(); }
+});
+
+test('分组校验：「未分组」是保留名，不让建（会和合成段撞名）', async () => {
+  const s = await startApp();
+  try {
+    const r = await s.call('POST', '/api/groups', { name: '未分组' });
+    assert.equal(r.status, 400, '保留名要拒绝');
+    assert.match(r.data.hint || '', /自动生成|保留/, '要说明为什么不行');
+
+    // 带空格的同样要拦（名字会先 trim）
+    const r2 = await s.call('POST', '/api/groups', { name: '  未分组  ' });
+    assert.equal(r2.status, 400);
+  } finally { await s.cleanup(); }
+});
+
+test('分组校验：PATCH 传 name=null 不能把分组改名成字面量 "null"', async () => {
+  const s = await startApp();
+  try {
+    const g = await s.call('POST', '/api/groups', { name: '待看', color: 'amber' });
+
+    const r = await s.call('PATCH', `/api/groups/${g.data.id}`, { name: null });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.name, '待看', 'null 应当表示"不改名字"，而不是改成 "null"');
+
+    const r2 = await s.call('PATCH', `/api/groups/${g.data.id}`, { color: null });
+    assert.equal(r2.data.color, 'amber', 'color=null 也不该改');
+
+    // 空字符串才是"我要清空名字" → 应当 400
+    const r3 = await s.call('PATCH', `/api/groups/${g.data.id}`, { name: '   ' });
+    assert.equal(r3.status, 400, '空名字要 400');
+  } finally { await s.cleanup(); }
+});
+
+test('分组校验：PATCH 换色也要走白名单', async () => {
+  const s = await startApp();
+  try {
+    const g = await s.call('POST', '/api/groups', { name: '待看' });
+    const bad = await s.call('PATCH', `/api/groups/${g.data.id}`, { color: 'lime' });
+    assert.equal(bad.status, 400);
+    const good = await s.call('PATCH', `/api/groups/${g.data.id}`, { color: 'purple' });
+    assert.equal(good.data.color, 'purple');
+  } finally { await s.cleanup(); }
+});

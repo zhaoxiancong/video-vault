@@ -361,6 +361,66 @@ function register(router, ctx) {
     return json(res, 200, { ok: true, removedFiles: removed, keptFile: keepFile });
   });
 
+  // ---------------------------------------------------------------- 批量删除
+  //
+  // ⚠️ 这是**不可逆**的操作（删文件那一档尤其）。几条刻意的设计：
+  //   · 与单条删除共用同一套语义：`keepFile` 的默认值是"保留"，
+  //     这里的 `deleteFiles` 默认也是 false —— 想删文件必须显式说要。
+  //   · 部分成功原则：混有已不存在的 id 时，该忽略的忽略、该报的报，
+  //     其余照常执行（和 group-action 一致）。
+  //   · **去重**：同一个 id 给三次不能算删了三条（那会把报数夸大）。
+  //   · 先 `cancel` 再删：不这么做会留下一个"库记录没了但进程还在下"的孤儿。
+  //   · 如实报 `freedBytes`，界面才能告诉用户"释放了多少空间"。
+
+  router.post('/api/videos/bulk-delete', async (req, res) => {
+    const body = await readJsonBody(req);
+    const raw = Array.isArray(body.ids) ? body.ids : [];
+    const ids = [...new Set(raw.map(Number).filter(Number.isInteger))];
+    const deleteFiles = body.deleteFiles === true;
+
+    if (!ids.length) {
+      throw new ValidationError('没有选中任何视频', { hint: '先勾选几条，再点删除。' });
+    }
+
+    const errors = [];
+    let deleted = 0;
+    let removedFiles = 0;
+    let freedBytes = 0;
+
+    for (const id of ids) {
+      const v = repo.getVideo(id);
+      if (!v) {
+        errors.push({ id, reason: '这条视频已经不在了' });
+        continue;
+      }
+
+      // 先取消：否则会留下"记录没了、进程还在下"的孤儿
+      try { scheduler.cancel(id, { deletePart: true }); } catch { /* 取消失败不该挡住删除 */ }
+
+      if (deleteFiles) {
+        // 与单条删除保持一致：删视频文件 + 封面。任何一步失败都只记录、不中断。
+        for (const f of [v.file_path, v.thumbnail_path]) {
+          if (!f) continue;
+          try {
+            if (fs.existsSync(f)) {
+              const size = fs.statSync(f).size;
+              fs.unlinkSync(f);
+              removedFiles += 1;
+              // 只把**视频文件**算进释放空间（封面那几十 KB 不值得混进来）
+              if (f === v.file_path) freedBytes += size;
+            }
+          } catch { errors.push({ id, reason: `文件删不掉（可能被占用）：${f}` }); }
+        }
+      }
+
+      repo.deleteVideo(id);
+      deleted += 1;
+    }
+
+    broadcast('library', { changed: true });
+    return json(res, 200, { deleted, removedFiles, freedBytes, errors });
+  });
+
   // ---------------------------------------------------------------- 批量动作
 
   const BATCH = ['pauseAll', 'resumeAll', 'retryFailed', 'clearFinished'];

@@ -323,8 +323,23 @@ export class FakeElement extends FakeNode {
       bubbles,
     };
     e.currentTarget = this;
-    e.preventDefault = () => { e.defaultPrevented = true; };
-    e.stopPropagation = () => { e._stopped = true; };
+    /**
+     * `preventDefault` / `stopPropagation` 要**同时**改调用方传进来的那个事件对象。
+     *
+     * 真实 DOM 里 `defaultPrevented` 就置在**派发出去的那个**事件上，
+     * 所以调用方 `el.dispatchEvent(ev)` 之后可以查 `ev.defaultPrevented` 判断
+     * "处理器有没有拦下默认行为"。而这里为了补 `target` 会造一个新对象 ——
+     * 不回写的话，测试查 `ev.defaultPrevented` 永远是 false，
+     * 于是"该 preventDefault 的地方没写"就测不出来。
+     */
+    e.preventDefault = () => {
+      e.defaultPrevented = true;
+      if (event && typeof event === 'object') event.defaultPrevented = true;
+    };
+    e.stopPropagation = () => {
+      e._stopped = true;
+      if (event && typeof event === 'object') event._stopped = true;
+    };
 
     /**
      * ⚠️ 冒泡路径要在**派发前一次性算好**，不能边走边读 `_parent`。
@@ -627,6 +642,34 @@ export function parseHTML(html, doc = new FakeDocument()) {
 }
 
 /**
+ * 极简的 Event，**能把自定义字段带出去**。
+ *
+ * 为什么不用 Node 内置的 `Event`：它把 `{ key: 'Enter' }` 这类字段存成
+ * 访问器（不可枚举），而 `dispatchEvent` 里是 `{ ...event }` 展开 ——
+ * 于是那些字段全丢，`e.key` 读出来是 undefined。
+ * 表现是"键盘功能在垫片里按了没反应"，既不报错也看不出原因。
+ */
+export class FakeEvent {
+  constructor(type, init = {}) {
+    this.type = String(type);
+    this.bubbles = init.bubbles === true;
+    this.cancelable = init.cancelable === true;
+    this.defaultPrevented = false;
+    if (init.key !== undefined) this.key = init.key;
+    if (init.detail !== undefined) this.detail = init.detail;
+  }
+  preventDefault() { this.defaultPrevented = true; }
+  stopPropagation() { this._stopped = true; }
+}
+
+export class FakeKeyboardEvent extends FakeEvent {
+  constructor(type, init = {}) {
+    super(type, init);
+    this.key = init.key !== undefined ? String(init.key) : '';
+  }
+}
+
+/**
  * 装一个全局环境，让前端模块能 import。
  *
  * @param {object} [opts]
@@ -732,6 +775,17 @@ export function installDom({ html = '', responses = {}, webRoot } = {}) {
     document, localStorage, fetch: fetchImpl, EventSource: FakeEventSource,
     navigator: { clipboard: { writeText: async () => {} } },
     Node: FakeNode,
+    /**
+     * ⚠️ `Event` 与 `KeyboardEvent` 必须是自己的实现，不能用 Node 内置的。
+     *
+     * 内置 `Event` 会把 `{ key: 'Enter' }` 这类自定义字段**丢掉**
+     * （它们是访问器、不可枚举），于是 `new Event('keydown', { key: 'Enter' })`
+     * 派发出去的事件 `e.key === undefined` ——
+     * 键盘相关的代码在垫片里**永远测不了**，而且不报错、只是"按了没反应"。
+     * 修 `grp-head` 的键盘可达性时才发现的。
+     */
+    Event: FakeEvent,
+    KeyboardEvent: FakeKeyboardEvent,
     // 用跟踪版：restore 时要把它们全部清掉，否则会泄漏到别的测试
     requestAnimationFrame: (fn) => trackTimeout(fn, 0),
     setTimeout: trackTimeout, clearTimeout, setInterval: trackInterval, clearInterval,

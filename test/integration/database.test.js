@@ -427,6 +427,58 @@ test('分组：名字为空或超长要报错，且不说"已保存"', () => {
   } finally { ctx.cleanup(); }
 });
 
+test('分组：重名归一化要覆盖非 ASCII（评审 Minor）', () => {
+  const ctx = freshRepo();
+  try {
+    /**
+     * 原来查重走 SQL 的 `COLLATE NOCASE`，它**只折叠 ASCII** ——
+     * 于是 `Ä`/`ä` 会建出两个肉眼一模一样的分组。现在改成 JS 里
+     * `NFKC` + `toLowerCase` 比对（分组数量极少，这么做完全够用）。
+     */
+    ctx.repo.createGroup({ name: 'Ärger' });
+    assert.throws(() => ctx.repo.createGroup({ name: 'ärger' }), (e) => e.httpStatus === 409,
+      'ä 和 Ä 看起来一样，该算重名');
+    assert.throws(() => ctx.repo.createGroup({ name: 'ÄRGER' }), (e) => e.httpStatus === 409);
+
+    // 全角字母（NFKC 会折成半角）
+    ctx.repo.createGroup({ name: 'ABC' });
+    assert.throws(() => ctx.repo.createGroup({ name: 'ＡＢＣ' }), (e) => e.httpStatus === 409,
+      '全角 ＡＢＣ 与半角 ABC 看起来一样');
+
+    // 组合字符：é 的两种 Unicode 写法
+    ctx.repo.createGroup({ name: 'cafe\u0301' });     // e + 组合重音
+    assert.throws(() => ctx.repo.createGroup({ name: 'caf\u00e9' }), (e) => e.httpStatus === 409,
+      'é 的两种写法要算同一个名字');
+
+    assert.equal(ctx.repo.listGroups().length, 3, '只该有 3 个组');
+  } finally { ctx.cleanup(); }
+});
+
+test('分组：改名时也要用同一套归一化查重（且要排除自己）', () => {
+  const ctx = freshRepo();
+  try {
+    const a = ctx.repo.createGroup({ name: 'Ärger' });
+    const b = ctx.repo.createGroup({ name: 'anderes' });
+
+    // 改成**别人的**名字（大小写不同也算）：必须 409
+    assert.throws(() => ctx.repo.updateGroup(a.id, { name: 'ANDERES' }), (e) => e.httpStatus === 409,
+      '改成别人名字的另一种大小写也要 409');
+
+    /**
+     * 改成"自己名字的另一种大小写"应当**成功**。
+     * ⚠️ 我第一版测试在这里断言 409，那是把语义搞反了：
+     *    `Ärger` 与 `ärger` 归一化后是同一个键，但它是**自己**的键 ——
+     *    查重要排除自己，否则用户连"把分组名改成大写"都做不到。
+     */
+    const same = ctx.repo.updateGroup(a.id, { name: 'ärger' });
+    assert.equal(same.name, 'ärger', '只改大小写应当允许');
+    assert.equal(same.id, a.id, '还是同一个分组，不该新建');
+
+    assert.equal(ctx.repo.listGroups().length, 2, '数量不变');
+    assert.equal(ctx.repo.listGroups().find((g) => g.id === b.id).name, 'anderes', '别的不受影响');
+  } finally { ctx.cleanup(); }
+});
+
 test('分组：多对多 —— 一个视频能同时在两个组里，count 正确', () => {
   const ctx = freshRepo();
   try {
