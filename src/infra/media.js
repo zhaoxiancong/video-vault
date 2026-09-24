@@ -259,8 +259,21 @@ function createMediaTools(config) {
     try { fs.mkdirSync(thumbsDir, { recursive: true }); } catch { /* 忽略 */ }
 
     if (fs.existsSync(paths.ffmpeg) && filePath && fs.existsSync(filePath)) {
+      /**
+       * ⚠️ 用 `-map 0:V:0`，**不要**用 `-map 0:v -map -0:V`。
+       *
+       * 踩过的坑（用户报"下载了合集但都没有封面"）：
+       *   原来写的是 `-map 0:v -map -0:V`（选所有视频流，再排除附加封面）。
+       *   但**封面流在 mkv 里不带 `attached_pic` 标记**（实测 ffprobe 报 0），
+       *   于是 `-0:V` 不排除它，而 `0:v` 选中的又只有这一条封面流 →
+       *   ffmpeg 报 `Output file does not contain any stream` 直接失败。
+       *   mp4 的封面带 attached_pic=1，所以 mp4 正常 ——
+       *   **B站的视频全是 mkv，于是全都抽不出封面**。
+       *
+       * `-map 0:V:0` = "第一条**非**附加封面的视频流"，两种容器都对。
+       */
       const r = runSync(paths.ffmpeg, [
-        '-y', '-v', 'error', '-i', filePath, '-map', '0:v', '-map', '-0:V',
+        '-y', '-v', 'error', '-i', filePath, '-map', '0:V:0',
         '-frames:v', '1', '-vf', 'scale=480:-2', dest,
       ], { timeout: 60000 });
       if (r.status === 0 && fs.existsSync(dest)) {

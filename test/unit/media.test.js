@@ -193,6 +193,70 @@ test('inspect() 会说明判断依据，而不是只给个布尔',
   } finally { ctx.cleanup(); }
 });
 
+/**
+ * 抽封面：**带嵌入封面的文件必须能抽出封面**。
+ *
+ * 这条是补一个真 bug：`grabThumbnail` 原来的参数是
+ *     `-map 0:v -map -0:V -frames:v 1 …`
+ * 而 `-map 0:v` 会把**附加封面流**（attached_pic，mkv/mp4 里的 mjpeg）也算进来，
+ * `-map -0:V` 又把它排除掉 —— 这类文件就变成"没有任何流可输出"，
+ * ffmpeg 报 `Output file does not contain any stream` 并**失败**。
+ *
+ * 讽刺的是：**恰恰是那些带着封面的文件抽不出封面**（实测 129 个文件里
+ * 有 15 个中招），而没有嵌入封面的反而正常。
+ */
+test('grabThumbnail：带嵌入封面的视频也要能抽出封面（要真 ffmpeg）',
+  { skip: skipWithout('ffmpeg') }, () => {
+    const ctx = freshMedia();
+    try {
+      const ffmpeg = ctx.config.paths.ffmpeg;
+      const src = path.join(ctx.dir, 'clip.mkv');
+      const cover = path.join(ctx.dir, 'cover.jpg');
+      const { runSync } = require('../../src/infra/subprocess');
+
+      // ① 一段真视频（1 秒彩条）
+      let r = runSync(ffmpeg, [
+        '-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=10:duration=1',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', src,
+      ], { timeout: 60000 });
+      assert.equal(r.status, 0, '造视频失败：' + String(r.stderr).slice(0, 200));
+
+      // ② 一张真封面（jsdelivr 的覆盖率报告图？不 —— 用 ffmpeg 自己生成一张）
+      r = runSync(ffmpeg, [
+        '-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=orange:size=320x240', '-frames:v', '1', cover,
+      ], { timeout: 60000 });
+      assert.equal(r.status, 0, '造封面失败');
+
+      // ③ 把封面**嵌进视频**（这正是 yt-dlp 的 --embed-thumbnail 做的事）
+      r = runSync(ffmpeg, [
+        '-y', '-v', 'error', '-i', src, '-i', cover,
+        '-map', '0', '-map', '1', '-c', 'copy', '-disposition:v:1', 'attached_pic',
+        src.replace('.mkv', '-withcover.mkv'),
+      ], { timeout: 60000 });
+      assert.equal(r.status, 0, '嵌封面失败：' + String(r.stderr).slice(0, 200));
+      const withCover = src.replace('.mkv', '-withcover.mkv');
+
+      // 确认这个文件**真的带上了**第二条视频流（封面），否则这条测试就没测到点子上。
+      // ⚠️ 注意：**mkv 里的封面流不带 `attached_pic` 标记**（实测是 0），
+      //    mp4 里才带。原来这条断言要求 attached_pic=1，于是 mkv 用例直接不过 ——
+      //    而"mkv 里不标"正是那个 bug 的成因。所以这里只要求"有两条视频流"。
+      const probe = runSync(ctx.config.paths.ffprobe, [
+        '-v', 'quiet', '-print_format', 'json', '-show_streams', withCover,
+      ], { timeout: 60000 });
+      const streams = JSON.parse(probe.stdout).streams || [];
+      const vids = streams.filter((s) => s.codec_type === 'video');
+      assert.ok(vids.length >= 2,
+        `这个文件必须有"正片 + 封面"两条视频流才测得到那个 bug，实际流：${streams.map((s) => s.codec_type + '/' + s.codec_name).join(', ')}`);
+
+      // ④ 抽封面 —— 修之前这里会失败（"Output file does not contain any stream"）
+      const thumb = ctx.media.grabThumbnail({ id: 999, thumbnail_url: null }, withCover);
+      assert.ok(thumb, '带嵌入封面的文件也必须能抽出封面');
+      assert.ok(fs.existsSync(thumb), '抽出来的文件要真的在磁盘上');
+      assert.ok(fs.statSync(thumb).size > 0, '而且不能是 0 字节');
+      assert.match(path.basename(thumb), /^999\.jpg$/, '命名规则：{id}.jpg');
+    } finally { ctx.cleanup(); }
+  });
+
 test('没有 ffprobe 时如实报告"没验过"，而不是假装验过了', () => {
   const ctx = freshMedia();
   try {
