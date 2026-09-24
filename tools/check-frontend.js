@@ -86,10 +86,61 @@ for (const [id, files] of usedIds) {
 }
 if (!problems) ok.push(`${usedIds.size} 个 #id 引用全部能在 index.html 里找到（或已在动态白名单里）`);
 
-const unused = [...htmlIds].filter((id) => !usedIds.has(id) && !DYNAMIC.has(id));
-if (unused.length) {
-  // 只提示不算错 —— 有些 id 是给 CSS/测试用的
-  console.log(`  ! HTML 里这些 id 没有被任何 JS 引用（可能是残留，也可能只给 CSS 用）：${unused.join(', ')}`);
+/**
+ * 控件"接线"检查 —— 抓"死按钮"。
+ *
+ * 踩过的坑（用户报的 bug）："清空已完成记录"那个按钮**从重构前就没有 `data-bulk`**，
+ *   而 `queue.js` 的委托只认 `[data-bulk]` → 点了永远没反应，也不报错。
+ *   它有个 `#btnClearDone`，但整个 JS 从没引用过它。
+ *
+ * 原来的检查抓不到：它查的是**反方向**（JS 引用了 HTML 里不存在的 id）；
+ * 而"HTML 里有 id、JS 从没引用"只印一行 `!` 提示，不报错。
+ *
+ * 现在：每个交互控件（button / input / select / textarea）必须至少满足一条：
+ *   ① 带 `data-*`（走事件委托的常见接法）
+ *   ② 它的 `#id` 在 JS 里出现过
+ *   ③ 落在**动态生成的控件**白名单里（前端自己 el() 建的，不在这份 HTML 里）
+ */
+const DELEGATED_MARKERS = [
+  /\[data-bulk\]/,
+  /\[data-lib\]/,
+  /\[data-grp\]/,
+  /\[data-pick\]/,
+  /\[data-layout\]/,
+  /\[data-action\]/,
+  /\[data-page\]/,
+  /\[data-disc\]/,
+];
+
+const jsAll = jsFiles.map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+const hasDelegation = DELEGATED_MARKERS.some((re) => re.test(jsAll));
+
+/**
+ * JS 里"提到过的 id"。**不能只看 `$('#x')` 这一种写法** ——
+ * 前端也会把选择器当字符串传出去（`fillSelect('#libSite', ...)`、
+ * `['#libStatus', 'status']` 这种数组遍历），只认 `$()` 会给出一批假警报，
+ * 而假警报会训练人忽略这个检查。凡是 `'#id'` 字面量都算。
+ */
+const jsMentionedIds = new Set([...jsAll.matchAll(/['"]#([A-Za-z0-9_-]+)['"]/g)].map((m) => m[1]));
+
+/** 从 HTML 里粗取控件开始标签（够用：这个页面的控件都是单行写的） */
+const controlTags = [...html.matchAll(/<(button|input|select|textarea)\b[^>]*>/gi)].map((m) => m[0]);
+/** 只查**有 id** 的：`<input type=text>` 这种没有 id 的纯表单元素不是"接线"问题 */
+const deadControls = [];
+for (const tag of controlTags) {
+  const idMatch = tag.match(/\bid\s*=\s*["']([^"']+)["']/);
+  if (!idMatch) continue;
+  const hasDataAttr = /\bdata-[a-z-]+\s*=/i.test(tag);
+  const hasOnAttr = /\bon(click|change|input)\s*=/i.test(tag);
+  if (hasDataAttr || hasOnAttr) continue;            // ① 委托接法
+  if (jsMentionedIds.has(idMatch[1])) continue;      // ② JS 里提到过这个 id
+  deadControls.push(`#${idMatch[1]}`);
+}
+if (deadControls.length) {
+  fail(`这些控件既没有 data-* 属性、它的 id 也没在 JS 里出现过，`
+    + `点了不会有任何反应（除非前端在别处按选择器找它）：${deadControls.join(', ')}`);
+} else {
+  ok.push(`${controlTags.length} 个交互控件都有接线（data-* 或 JS 里引用过它的 id）`);
 }
 
 // ---------------------------------------------------------------- 3

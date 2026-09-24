@@ -1776,6 +1776,98 @@ test('全选 ③：点分组勾选框不该顺手把这一组折叠（冒泡要�
   } finally { dom.restore(); }
 });
 
+// ---------------------------------------------------------------- 队列按钮的契约
+
+/**
+ * 队列面板上那几个批量按钮，靠 `data-bulk` 属性和 `queue.js` 的委托接上。
+ *
+ * ⚠️ 这组测试是补一个**老 bug**："清空已完成记录"从重构前就没有 `data-bulk`，
+ *    而 `queue.js` 只认 `[data-bulk]` → 那个按钮**点了永远没反应**，
+ *    也没人报错（HTML 里有个 `#btnClearDone`，但整个 JS 从没引用过它）。
+ *    `check-frontend.js` 查的是反方向（JS 引用了不存在的 id），抓不到这种。
+ *
+ * 用"HTML 与 JS 的契约"当断言对象：凡是按钮，要么静态带 `data-bulk`，
+ * 要么在 JS 里被 `#id` 引用到 —— 两者都不满足就是死的。
+ */
+test('队列：每个批量按钮都真的接上了处理器（data-bulk 或 #id 引用）', () => {
+  const dom = installDom({ html: HTML });
+  try {
+    const PREFIXES = ['btnPause', 'btnResume', 'btnRetry', 'btnClear'];
+    const buttons = [...globalThis.document.querySelectorAll('button')]
+      .filter((b) => PREFIXES.some((p) => String(b.id).startsWith(p)) || b.dataset.bulk);
+
+    assert.ok(buttons.length >= 4, `至少该有 4 个队列批量按钮，实际 ${buttons.length}`);
+
+    // JS 源码里出现过的 #id
+    const webDir = path.join(WEB, 'views');
+    const jsSource = fs.readdirSync(webDir)
+      .filter((f) => f.endsWith('.js'))
+      .map((f) => fs.readFileSync(path.join(webDir, f), 'utf8'))
+      .join('\n');
+
+    const dead = [];
+    for (const b of buttons) {
+      const byAttr = Boolean(b.dataset.bulk);
+      const byId = b.id ? jsSource.includes(`#${b.id}`) : false;
+      if (!byAttr && !byId) dead.push(b.id || b.textContent);
+    }
+    assert.deepEqual(dead, [],
+      `这些按钮既没有 data-bulk、也没在 JS 里被引用，点了不会有任何反应：${dead.join(', ')}`);
+  } finally { dom.restore(); }
+});
+
+test('队列：点「清空已完成记录」会弹确认框，并说清"文件保留"', async () => {
+  const { dom } = await bootFrontend({ responses: fakeResponses() });
+  try {
+    // 队列面板一直显示在页面上（没有单独的「队列」标签页），不用切页
+    const btn = globalThis.document.getElementById('btnClearDone');
+    assert.ok(btn, '应当有这个按钮');
+    btn.click();
+    await new Promise((r) => setTimeout(r, 60));
+
+    const box = globalThis.document.querySelector('#modal .dialog');
+    assert.ok(box, '点了要弹确认框（点了没反应就是这个 bug 的症状）');
+    assert.match(box.textContent, /文件都会保留/, `要说清只清记录不动文件，实际：${box.textContent}`);
+    const primary = box.querySelector('.dialog-actions .btn-primary');
+    assert.match(primary.textContent, /保留文件/, '默认那一边要是安全的');
+
+    assert.equal(dom.calls.filter((c) => c.url.includes('/api/queue/action')).length, 0,
+      '还没确认就不该发请求');
+  } finally { dom.restore(); }
+});
+
+test('队列：确认「清空记录」后发 action=clearFinished', async () => {
+  const { dom } = await bootFrontend({
+    responses: {
+      ...fakeResponses(),
+      'POST /api/queue/action': { ok: true, affected: 59 },
+    },
+  });
+  try {
+    globalThis.document.getElementById('btnClearDone').click();
+    await new Promise((r) => setTimeout(r, 60));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => /保留文件/.test(b.textContent)).click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    const hit = dom.calls.find((c) => c.method === 'POST' && c.url.includes('/api/queue/action'));
+    assert.ok(hit, `要发批量动作请求。实际：${dom.calls.map((c) => c.method + ' ' + c.url.split('?')[0]).join(' | ')}`);
+    assert.equal(hit.body.action, 'clearFinished');
+  } finally { dom.restore(); }
+});
+
+test('队列：确认框里点「取消」什么都不发', async () => {
+  const { dom } = await bootFrontend({ responses: fakeResponses() });
+  try {
+    globalThis.document.getElementById('btnClearDone').click();
+    await new Promise((r) => setTimeout(r, 60));
+    [...globalThis.document.querySelectorAll('#modal .dialog-actions button')]
+      .find((b) => b.textContent === '取消').click();
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(dom.calls.filter((c) => c.url.includes('/api/queue/action')).length, 0, '取消不该发请求');
+  } finally { dom.restore(); }
+});
+
 // ---------------------------------------------------------------- 批量删除
 
 /** 两条带文件的记录 + 批量删除接口 */

@@ -120,7 +120,11 @@
         <div class="panel-actions">
           <span class="stat" id="historySummary"></span>
           <button class="btn btn-sm" id="btnHistoryToggle">展开</button>
-          <button class="btn btn-sm btn-danger" id="btnClearDone">清空已完成记录</button>
+          <!-- ⚠️ data-bulk 不能少：queue.js 的委托只认 [data-bulk]，
+               少了它这个按钮就是个死按钮（点了没反应、也不报错）。
+               旁边那三个（暂停/继续/重试）都带这个属性。
+               id 留着只为在 DevTools 里好找，逻辑不依赖它。 -->
+          <button class="btn btn-sm btn-danger" id="btnClearDone" data-bulk="clearFinished">清空已完成记录</button>
         </div>
       </div>
       <div id="historyEmpty" class="empty" hidden>还没有已结束的任务。</div>
